@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [unreleased]
 
+### Changed
+
+- Default `backend` for `rmsd` function changed from `rdkit` to `qcinf`.
+- Default `backend` for `align` function changed from `rdkit` to `qcinf`.
+
 ## [0.1.1] - 2025-06-01
 
 ### Added

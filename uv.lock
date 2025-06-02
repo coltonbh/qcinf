@@ -636,26 +636,8 @@ wheels = [
 ]
 
 [[package]]
-name = "qcio"
-version = "0.14.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "eval-type-backport" },
-    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "numpy", version = "2.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "toml" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/fe/3bc5675e991177cefe05402c2ab1e16d55ed019c6df78693c79e23be5335/qcio-0.14.0.tar.gz", hash = "sha256:b31fe76a178d84ad294a0c760171190500700be4a264a5320bcc746c6ee1768e", size = 46130 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/73/e28680618a5ee3a78e2b64bb6d0ba3f71f25a7486e24cbd386aa95aac984/qcio-0.14.0-py3-none-any.whl", hash = "sha256:198c7e4d46cb9db62cf3afc7acbb139e73567989f77c98e9fefe342155d8ae41", size = 49833 },
-]
-
-[[package]]
 name = "qcinf"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -704,6 +686,24 @@ dev = [
     { name = "rdkit", specifier = ">=2024.9.6" },
     { name = "ruff", specifier = ">=0.11.1" },
     { name = "types-toml", specifier = ">=0.10.8.20240310" },
+]
+
+[[package]]
+name = "qcio"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "eval-type-backport" },
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "numpy", version = "2.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "toml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4b/fe/3bc5675e991177cefe05402c2ab1e16d55ed019c6df78693c79e23be5335/qcio-0.14.0.tar.gz", hash = "sha256:b31fe76a178d84ad294a0c760171190500700be4a264a5320bcc746c6ee1768e", size = 46130 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/73/e28680618a5ee3a78e2b64bb6d0ba3f71f25a7486e24cbd386aa95aac984/qcio-0.14.0-py3-none-any.whl", hash = "sha256:198c7e4d46cb9db62cf3afc7acbb139e73567989f77c98e9fefe342155d8ae41", size = 49833 },
 ]
 
 [[package]]
