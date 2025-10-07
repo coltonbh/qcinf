@@ -150,9 +150,10 @@ def _align_rdkit(
         refstruct: The reference structure.
         symmetry: Whether to consider symmetries in the structures before aligning and
             calculating the RMSD, i.e., to allow atom renumbering. This relies on the
-            RDKit's `GetBestAlignmentTransform` method and `GetBestRMS` functions. If False, the RMSD is
-            calculated with alignment but without considering symmetry, i.e., naively
-            assuming the atoms are already correctly indexed across structures.
+            RDKit's `GetBestAlignmentTransform` method and `GetBestRMS` functions. If
+            False, the RMSD is calculated with alignment but without considering
+            symmetry, i.e., naively assuming the atoms are already correctly indexed
+            across structures.
         use_hueckel: Whether to use Hueckel method when determining connectivity.
             Applies only to `best=True`.
         use_vdw: Whether to use Van der Waals radii when determining connectivity.
@@ -163,7 +164,7 @@ def _align_rdkit(
             "bohr". If "angstrom", the RMSD will be in Angstroms.
 
     Returns:
-        Tuple of the aligned structure and the RMSD in Angstroms.
+        Tuple of the aligned structure and the RMSD in Bohr or Angstroms.
     """
     # Create RDKit molecules
     mol = _structure_to_rdkit_mol(struct)
@@ -415,7 +416,7 @@ def _determine_bonds_rdkit(
     use_vdw: bool = False,
     cov_factor: float = 1.3,
     allow_charged_fragments: bool = False,
-) -> Mol:
+) -> "Mol":
     """
     Determine the bonds in an RDKit molecule, using robust fallback parameters.
 
@@ -527,7 +528,7 @@ def _determine_bonds_rdkit(
 
 @requires_rdkit
 def _determine_connectivity_rdkit(
-    mol: Mol,
+    mol: "Mol",
     charge: int,
     use_hueckel: bool = True,
     use_vdw: bool = True,
