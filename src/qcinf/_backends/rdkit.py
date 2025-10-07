@@ -416,7 +416,7 @@ def _determine_bonds_rdkit(
     use_vdw: bool = False,
     cov_factor: float = 1.3,
     allow_charged_fragments: bool = False,
-) -> Mol:
+) -> "Mol":
     """
     Determine the bonds in an RDKit molecule, using robust fallback parameters.
 
@@ -528,7 +528,7 @@ def _determine_bonds_rdkit(
 
 @requires_rdkit
 def _determine_connectivity_rdkit(
-    mol: Mol,
+    mol: "Mol",
     charge: int,
     use_hueckel: bool = True,
     use_vdw: bool = True,
