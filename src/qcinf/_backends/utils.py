@@ -51,7 +51,7 @@ def rotation_matrix(axis: str, angle_deg: float) -> np.ndarray:
 
     Returns:
         np.ndarray: 3x3 rotation matrix.
-    
+
     Example:
         >>> rotation_matrix('z', 90)
         array([[ 0., -1.,  0.],
@@ -156,3 +156,108 @@ def compute_rmsd(
     diff = coords1 - coords2
     # Sum squared differences for each atom (row) and average over all atoms
     return np.sqrt(np.mean(np.sum(diff**2, axis=1)))
+
+
+def _permute_to_best_match(
+    coords1: np.ndarray, coords2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return coords2 permuted to best match coords1 (minimal RMSD).
+
+    Uses Hungarian on the pair-wise distance matrix *after* a first Kabsch
+    superposition pass.
+    """
+    # 1. Rough Kabsch alignment to reduce distance spread
+    R, c1, c2 = kabsch(coords1, coords2)
+    coords2_aligned = (coords2 - c2) @ R.T + c1
+
+    # 2. Build cost matrix of squared distances
+    d2 = np.sum((coords1[:, None, :] - coords2_aligned[None, :, :]) ** 2, axis=2)
+
+    perm, _ = _hungarian(d2)
+    return coords2[perm], coords2_aligned[perm]
+
+
+def _hungarian(cost: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Minimal-cost assignment using the Hungarian algorithm.
+
+    Parameters
+    ----------
+    cost : (N, N) ndarray
+        Square cost matrix.  `cost[i, j]` is the cost of matching
+        row *i* (atom *i* in struct1) to column *j* (atom *j* in struct2).
+
+    Returns
+    -------
+    assign : ndarray of shape (N,)
+        `assign[i] == j` means row *i* is matched to column *j*.
+    total_cost : float
+        Sum of the costs for the optimal assignment.
+    """
+    C = cost.copy()
+    n = C.shape[0]
+
+    # --- Step 1: subtract row minima
+    C -= C.min(axis=1, keepdims=True)
+    # --- Step 2: subtract column minima
+    C -= C.min(axis=0, keepdims=True)
+
+    # Masks for starred / primed zeros
+    star = np.zeros_like(C, dtype=bool)
+    prime = np.zeros_like(C, dtype=bool)
+    covered_rows = np.zeros(n, dtype=bool)
+    covered_cols = np.zeros(n, dtype=bool)
+
+    # Helper to star one zero per row (first pass)
+    for r in range(n):
+        c = np.where((C[r] == 0) & ~covered_cols)[0]
+        if c.size:
+            star[r, c[0]] = True
+            covered_cols[c[0]] = True
+    covered_cols[:] = False  # reset
+
+    def _cover_starred_cols() -> None:
+        """Cover every column that contains a starred zero."""
+        covered_cols[:] = star.any(axis=0)
+
+    _cover_starred_cols()
+
+    while covered_cols.sum() < n:
+        # Step 4: find a non-covered zero
+        while True:
+            rows, cols = np.where((C == 0) & ~covered_rows[:, None] & ~covered_cols)
+            if rows.size == 0:
+                # Step 6: add smallest uncovered value to covered rows
+                min_uncovered = C[~covered_rows[:, None] & ~covered_cols].min()
+                C[~covered_rows[:, None] & ~covered_cols] -= min_uncovered
+                C[covered_rows[:, None] & covered_cols] += min_uncovered
+                rows, cols = np.where((C == 0) & ~covered_rows[:, None] & ~covered_cols)
+            r, c = rows[0], cols[0]
+            prime[r, c] = True
+            # If there is a starred zero in this row, cover the row and uncover the column
+            c_star = np.where(star[r])[0]
+            if c_star.size:
+                covered_rows[r] = True
+                covered_cols[c_star[0]] = False
+            else:
+                # Step 5: augment path
+                path: list[tuple[int, int]] = [(r, c)]
+                while True:
+                    r_star = np.where(star[:, path[-1][1]])[0]
+                    if r_star.size == 0:
+                        break
+                    path.append((r_star[0], path[-1][1]))
+                    c_prime = np.where(prime[path[-1][0]])[0]
+                    path.append((path[-1][0], c_prime[0]))
+                for rr, cc in path:
+                    star[rr, cc] = not star[rr, cc]
+                    prime[rr, cc] = False
+                prime[:] = False
+                covered_rows[:] = False
+                _cover_starred_cols()
+                break
+
+    assign = star.argmax(axis=1)
+    total = cost[np.arange(n), assign].sum()
+    return assign, float(total)

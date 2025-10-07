@@ -44,6 +44,7 @@ dev = [
     "openbabel-wheel>=3.1.1.21",
     "rdkit>=2024.9.6",
     "types-toml>=0.10.8.20240310",
+    "jupyterlab>=4.4.4",
 ]
 
 [project.optional-dependencies]
