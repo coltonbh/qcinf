@@ -1,6 +1,6 @@
 """Top-level functions for geometry-related algorithms."""
 
-from typing import Callable
+from collections.abc import Callable
 
 from qcio import Structure
 

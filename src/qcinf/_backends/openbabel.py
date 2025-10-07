@@ -1,7 +1,8 @@
 """Open Babel backend (wrapper functions) for qcinf."""
 
 import functools
-from typing import Callable, TypeVar, Union
+from collections.abc import Callable
+from typing import TypeVar
 
 import numpy as np
 import qcconst.periodic_table as pt
@@ -13,7 +14,7 @@ try:
     from openbabel import openbabel as ob
     from openbabel import pybel
 except ModuleNotFoundError as _e:
-    _OB_ERR: Union[Exception, None] = _e
+    _OB_ERR: Exception | None = _e
 else:
     _OB_ERR = None
 

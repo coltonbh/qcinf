@@ -2,8 +2,9 @@
 
 import functools
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TypeVar, Union
+from typing import TypeVar
 
 import numpy as np
 from qcconst import constants
@@ -16,7 +17,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, Mol, rdDetermineBonds, rdMolAlign
 except ModuleNotFoundError as _e:
-    _RDKIT_ERR: Union[Exception, None] = _e
+    _RDKIT_ERR: Exception | None = _e
 else:
     _RDKIT_ERR = None
 
