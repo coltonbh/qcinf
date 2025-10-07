@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [unreleased]
 
+### Fixed
+
+- `RDKit` backend raising `NameError` because `Mol` object was not defined if `rdkit` was not installed. With deferred evaluation it now correctly raises the `ModuleNotFoundError` when top-level functions try to use `rdkit` if it's not installed. [#6](https://github.com/coltonbh/qcinf/pull/6)
+
 ## [0.1.1] - 2025-06-01
 
 ### Added
