@@ -2,8 +2,9 @@
 
 import functools
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TypeVar, Union
+from typing import TypeVar
 
 import numpy as np
 from qcconst import constants
@@ -16,7 +17,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, Mol, rdDetermineBonds, rdMolAlign
 except ModuleNotFoundError as _e:
-    _RDKIT_ERR: Union[Exception, None] = _e
+    _RDKIT_ERR: Exception | None = _e
 else:
     _RDKIT_ERR = None
 
@@ -415,7 +416,7 @@ def _determine_bonds_rdkit(
     use_vdw: bool = False,
     cov_factor: float = 1.3,
     allow_charged_fragments: bool = False,
-) -> Mol:
+) -> "Mol":
     """
     Determine the bonds in an RDKit molecule, using robust fallback parameters.
 
@@ -527,7 +528,7 @@ def _determine_bonds_rdkit(
 
 @requires_rdkit
 def _determine_connectivity_rdkit(
-    mol: Mol,
+    mol: "Mol",
     charge: int,
     use_hueckel: bool = True,
     use_vdw: bool = True,

@@ -1,6 +1,7 @@
 """Top-level functions for structure conversion algorithms."""
 
-from typing import Any, Callable, Union
+from collections.abc import Callable
+from typing import Any
 
 from qcio import Structure
 
@@ -52,7 +53,7 @@ def structure_to_smiles(
     *,
     backend: str = "rdkit",
     hydrogens: bool = False,
-    options: Union[dict[str, Any], None] = None,
+    options: dict[str, Any] | None = None,
 ) -> str:
     """
     Convert a [`qcio.Structure`][qcio.Structure] into a canonical SMILES string.
