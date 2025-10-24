@@ -100,6 +100,15 @@ def _smiles_to_structure_ob(
     # Get charge
     charge = mol.charge  # type: ignore
 
+    # Connectivity
+    connectivity = []
+    for bond in ob.OBMolBondIter(mol.OBMol):  # type: ignore
+        begin_idx = bond.GetBeginAtomIdx() - 1  # Convert to 0-based index
+        end_idx = bond.GetEndAtomIdx() - 1  # Convert to 0-based index
+        # Treat aromatic bonds explicitly as 1.5; otherwise use the integer order
+        order = 1.5 if bond.IsAromatic() else float(bond.GetBondOrder())
+        connectivity.append((begin_idx, end_idx, float(order)))
+
     return Structure(
         symbols=atoms,
         geometry=geometry_bohr,
@@ -109,6 +118,7 @@ def _smiles_to_structure_ob(
             "smiles": smiles,
             "canonical_smiles_program": "openbabel",
         },
+        connectivity=connectivity,
         **struct_kwargs,
     )
 

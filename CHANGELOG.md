@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [unreleased]
 
+### Added
+
+- `Structure.connectivity` information when creating a `Structure` using `smiles_to_structure`. [#7](https://github.com/coltonbh/qcinf/pull/7)
+
 ## [0.2.0] - 2025-10-07
 
 ### Fixed
