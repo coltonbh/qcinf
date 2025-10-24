@@ -315,6 +315,14 @@ def _smiles_to_structure_rdkit(
     # Get charge
     charge = Chem.GetFormalCharge(mol)  # type: ignore
 
+    # Connectivity
+    connectivity = []
+    for bond in mol.GetBonds():  # type: ignore
+        begin_idx = bond.GetBeginAtomIdx()
+        end_idx = bond.GetEndAtomIdx()
+        bond_order = bond.GetBondTypeAsDouble()
+        connectivity.append((begin_idx, end_idx, bond_order))
+
     return Structure(
         symbols=atoms,
         geometry=geometry_bohr,
@@ -324,6 +332,7 @@ def _smiles_to_structure_rdkit(
             "smiles": smiles,
             "canonical_smiles_program": "rdkit",
         },
+        connectivity=connectivity,
         **struct_kwargs,
     )
 
