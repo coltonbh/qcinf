@@ -223,8 +223,8 @@ def snap_rmsd(
                 # Build mapping P_c: G1 global idx -> G2 global idx
                 P_c = M[C[perm.array_form]]
 
-                # Handle first-component and/or per-component realignment if requested
                 if align and ((batch_idx == 0 and c_idx == 0) or realign_per_component):
+                    # Handle first-component and/or per-component realignment if requested
                     # Build trial mapping over P_trial = fixed ∪ C
                     P_trial = P_opt.copy()
                     P_trial[C] = P_c
@@ -234,14 +234,14 @@ def snap_rmsd(
 
                     known = P_trial >= 0  # boolean mask for known indices
                     idx2 = P_trial[known].astype(int)
-                    G1_S = G1_geom_trial[known]
-                    G2_S = G2_geom[idx2]
-                    rmsd = compute_rmsd(G1_S, G2_S, align=False)
+                    G1_trial = G1_geom_trial[known]
+                    G2_trial = G2_geom[idx2]
                 else:
                     # No per-candidate realign; evaluate only on the component
-                    G1C_geom = G1_geom[C]
-                    G2C_geom = G2_geom[P_c]
-                    rmsd = compute_rmsd(G1C_geom, G2C_geom, align=False)
+                    G1_trial = G1_geom[C]
+                    G2_trial = G2_geom[P_c]
+
+                rmsd = compute_rmsd(G1_trial, G2_trial, align=False)
                 if rmsd < best_rmsd:
                     best_rmsd = rmsd
                     best_perm = P_c
@@ -265,21 +265,43 @@ if __name__ == "__main__":
     from time import time
 
     from qcio import Structure
+    from spyrmsd.rmsd import symmrmsd
 
     from qcinf import rmsd, smiles_to_structure
 
-    # smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
-    smiles = "CCCCCC"
+    smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
+    # smiles = "CCCCCC"
     s1 = smiles_to_structure(smiles)
     s2 = smiles_to_structure(smiles)
-    
+
     start = time()
-    rmsd_val, perm = snap_rmsd(s1, s2)
-    elapsed_s = time() - start
-    print(rmsd_val, perm)
-    
+    s_rmsd, perm = snap_rmsd(s1, s2, align=True)
+    snap_time = time() - start
+
     start = time()
-    print(rmsd(s1, s2, backend="rdkit"))
-    elapsed_r = time() - start
-    print(f"RDKit RMSD time: {elapsed_r:.3f} s")
-    print(f"snapRMSD time: {elapsed_s:.3f} s")
+    rdkit_rmsd = rmsd(s1, s2, backend="rdkit")
+    rdkit_time = time() - start
+
+    start = time()
+    spyrmsd_rmsd = symmrmsd(
+        s1.geometry,
+        s2.geometry,
+        s1.symbols,
+        s2.symbols,
+        s1.adjacency_matrix,
+        s2.adjacency_matrix,
+        center=True,
+        minimize=True,
+    )
+    spyrmsd_rmsd_time = time() - start
+
+    raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
+
+    print(s_rmsd, perm)
+    print(spyrmsd_rmsd)
+    print(rdkit_rmsd)
+    print(raw)
+    print(f"snapRMSD time: {snap_time:.3f} s")
+    print(f"spyrmsd RMSD time: {spyrmsd_rmsd_time:.3f} s")
+    print(f"RDKit RMSD time: {rdkit_time:.3f} s")
+    
