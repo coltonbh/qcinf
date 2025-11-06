@@ -15,6 +15,7 @@
         "ndarray",
         "numthreads",
         "openbabel",
+        "pointwise",
         "pybel",
         "qcconst",
         "qcinf",
@@ -23,6 +24,8 @@
         "refmol",
         "refstruct",
         "rmsd",
+        "schreier",
+        "setwise",
         "swigvarlink",
         "Waals"
     ]
