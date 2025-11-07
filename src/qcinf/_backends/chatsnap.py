@@ -1,13 +1,14 @@
 # snap_rmsd.py
 from __future__ import annotations
-from typing import Any, Callable, Iterable, Sequence
+
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import pynauty as pn
-from sympy.combinatorics.permutations import Permutation
 from sympy.combinatorics.perm_groups import PermutationGroup
-from .utils import kabsch, compute_rmsd
-from qcio import Structure
+from sympy.combinatorics.permutations import Permutation
+
+from .utils import compute_rmsd, kabsch
 
 # --- Types ------------------------------------------------------------------------
 Index = int
@@ -262,7 +263,6 @@ def snap_rmsd(
 if __name__ == "__main__":
     from time import time
 
-    from qcio import Structure
     from spyrmsd.rmsd import symmrmsd
 
     from qcinf import rmsd, smiles_to_structure

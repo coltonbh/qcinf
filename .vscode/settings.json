@@ -13,6 +13,7 @@
         "kabsch",
         "linalg",
         "MMFF",
+        "nbrs",
         "ndarray",
         "numthreads",
         "openbabel",

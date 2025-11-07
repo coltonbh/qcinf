@@ -1,4 +1,5 @@
-from typing import Any, Callable, Iterable, Sequence
+from collections import defaultdict
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import pynauty as pn
@@ -19,9 +20,9 @@ def _list_of_sets(coloring: list[Any]) -> list[set[Any]]:
     >>> _list_of_sets([0,0,0,1,1,2])
     [{0, 1, 2}, {3, 4}, {5}]
     """
-    buckets: dict[int, set[int]] = {}
+    buckets: dict[int, set[int]] = defaultdict(set)
     for vertex_idx, color in enumerate(coloring):
-        buckets.setdefault(color, set()).add(vertex_idx)
+        buckets[color].add(vertex_idx)
     return list(buckets.values())
 
 
@@ -147,25 +148,25 @@ def _pendant_factor(
 
     Returns:
         List of batches, where the first batch is the backbone and the subsequent batch
-            contains the pendant groups.
+            contains the pendant groups factored by their parent atom and element type.
     """
-    batches = []
-    pendants: dict[str, list[int]] = {}  # Key = f"{parent_idx}{atom_symbol}"
+    batches = [[], []]
+    # (parent_idx, symbol) -> list of atom indices
+    pendant_groups: dict[tuple[int, str], list[int]] = defaultdict(list)
+    backbone_indices = set(range(len(s1.symbols)))
 
     # Identify pendant groups
-    adj_dict = s1.adjacency_dict
-    for atom, neighbors in adj_dict.items():
-        if len(neighbors) == 1:  # Possible pendant
-            parent = neighbors[0]
-            if len(adj_dict[parent]) > 1:  # Confirm pendant
-                pendants.setdefault(f"{parent}{s1.symbols[atom]}", []).append(atom)
-    pendant_indices = {i for lst in pendants.values() for i in lst}
-    backbone = [i for i in range(len(s1.symbols)) if i not in pendant_indices]
-    # Build batches: backbone first, then pendants
-    batches.append([backbone])
-    batches.append([])
-    for group in pendants.values():
-        batches[1].append(group)
+    adj = s1.adjacency_dict
+    for atom_idx, nbrs in adj.items():
+        if len(nbrs) == 1:  # Possible duplicated pendant
+            pendant_groups[(nbrs[0], s1.symbols[atom_idx])].append(atom_idx)
+
+    # Build batches: pendants first, then backbone. Sorting for deterministic output.
+    for group in pendant_groups.values():
+        if len(group) > 1:  # Multiple atoms in this pendant group
+            batches[1].append(sorted(group))
+            backbone_indices.difference_update(group)
+    batches[0].append(sorted(backbone_indices))
     return batches
 
 
@@ -260,9 +261,8 @@ def snap_rmsd(
             Ac_local = _setwise_stabilizer_on_C(A_adj, A_coloring, fixed, C)
 
             for perm in Ac_local.generate_schreier_sims():
-                T = _target_indices_for_component(
-                    C, P, fixed, s1, s2
-                )  # s2 target pool for C
+                # s2 target pool for C
+                T = _target_indices_for_component(C, P, fixed, s1, s2)
                 idx2_C = T[perm.array_form]
 
                 if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
@@ -291,8 +291,8 @@ def snap_rmsd(
             P[C] = T[best_perm]
             fixed[C] = True
 
-            if align and c_idx == 0:
-                # First component in batch: must align to establish common frame
+            # Align first component in batch to establish common frame
+            if align and b_idx == 0 and c_idx == 0:                
                 A_geom = _align_known(A_geom, B_geom, P, fixed)
 
         # Batch-level global realignment; not realign to avoid duplicated effort
@@ -328,6 +328,7 @@ def _target_indices_for_component(
     # (typical when backbone is fixed before pendants).
     boundary = np.array(sorted(boundary), dtype=int)
     if boundary.size == 0:
+        print("FALLBACK! NO BOUNDARY AT ALL")
         # fully detached component (rare); fall back to canonical pool
         return P[C]
 
@@ -361,6 +362,7 @@ def _target_indices_for_component(
     # Expect |cand_sorted| == |C|
     # If not equal, you can fall back to P[C] or raise for debugging.
     if cand_sorted.size != C.size:
+        print("FALLBACK! MISMATCHED CANDIDATE POOL SIZE")
         # Fallback (keeps things running, but you’ll lose optimality)
         return P[C]
 
@@ -373,16 +375,18 @@ if __name__ == "__main__":
     from qcio import Structure
     from spyrmsd.rmsd import symmrmsd
 
-    from qcinf import rmsd, smiles_to_structure
+    from qcinf import smiles_to_structure
+    from qcinf.algorithms.geometry import rmsd
 
     # smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
-    smiles = "CCCCCC"
+    smiles = "CCCCCCF"
     s1 = smiles_to_structure(smiles)
     s2 = smiles_to_structure(smiles)
 
-    # batches = _pendant_factor(s1)
+    batches = _pendant_factor(s1)
+    print(batches)
     start = time()
-    s_rmsd, perm = snap_rmsd(s1, s2, align=True)
+    s_rmsd, perm = snap_rmsd(s1, s2, align=True, factor="pendant")
     snap_time = time() - start
 
     start = time()
