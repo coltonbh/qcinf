@@ -7,6 +7,7 @@
         "Cheminformatics",
         "ETKDG",
         "filterwarnings",
+        "flatnonzero",
         "ghemical",
         "Hueckel",
         "kabsch",
