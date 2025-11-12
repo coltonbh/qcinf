@@ -1,5 +1,7 @@
+import itertools as it
 from collections import defaultdict
-from typing import Any, Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, Sequence, Iterable
 
 import numpy as np
 import pynauty as pn
@@ -9,21 +11,26 @@ from sympy.combinatorics.permutations import Permutation
 
 from .utils import compute_rmsd, kabsch
 
-Index = int
-Component = list[Index]
-Batch = list[Component]
-
 
 def _list_of_sets(coloring: list[Any]) -> list[set[Any]]:
     """Convert coloring list to pynauty list of sets format.
 
-    >>> _list_of_sets([0,0,0,1,1,2])
-    [{0, 1, 2}, {3, 4}, {5}]
+    !!! Important
+        The order of the sets in the output list MUST be consistent between graphs.
+        For this reason we sort the color keys before constructing the output list.
+
+
+    >>> _list_of_sets(["H","O","C","H","C","C"])
+    [{2, 4, 5}, {0, 3}, {1}]  # In alphabetical order: C, H, O
+
+    >>> _list_of_sets([2,1,0,1,0,0])
+    [{2, 4, 5}, {1, 3}, {0}]  # In numerical order: 0, 1, 2
     """
     buckets: dict[int, set[int]] = defaultdict(set)
     for vertex_idx, color in enumerate(coloring):
         buckets[color].add(vertex_idx)
-    return list(buckets.values())
+    ordered_colors = sorted(buckets.keys())
+    return [buckets[colors] for colors in ordered_colors]
 
 
 def _to_pynauty_graph(adj_dict: dict[int : list[int]], coloring: list[Any]) -> pn.Graph:
@@ -69,15 +76,23 @@ def _component_partition(
     return new_coloring
 
 
-def _map_from_canonical_labels(
-    can1: list[int],
-    can2: list[int],
+def _map_via_canonical_labels(
+    A: pn.Graph,
+    B: pn.Graph,
 ) -> list[int]:
-    """Generate a map of indices from G1 -> G2 from canonical labels."""
-    inv2 = [0] * len(can2)  # label -> original index in s2
-    for i, label in enumerate(can2):
-        inv2[label] = i
-    return [inv2[lab1] for lab1 in can1]
+    """Generate a mapping of vertices from A -> B using canonical labels.
+    The final mapping P satisfies P[i_A] = i_B.
+
+    Note:
+        pynauty's canonical labels map canon -> original index, meaning that
+        canX[i_canon] = i_orig.
+    """
+    canA, canB = pn.canon_label(A), pn.canon_label(B)
+    inv1 = [0] * len(canA)  # inv(can1): orig1 -> canon
+    for i_canon, i_orig1 in enumerate(canA):
+        inv1[i_orig1] = i_canon
+    # P[i_orig1] = can2[canon_of_i_orig1]
+    return [canB[inv1[i_orig1]] for i_orig1 in range(len(canA))]
 
 
 def _restrict_global_generators_to_C(
@@ -117,8 +132,7 @@ def _setwise_stabilizer_on_C(
     Parameters:
         adj_dict: The adjacency dictionary of the structure graph.
         coloring: The vertex coloring (partition) for the whole structure.
-        P_opt: Already fixed part of the optimal permutation as a list with None for
-            unfixed indices.
+        fixed: Boolean array marking fixed vertices.
         component: The list of indices in the current component.
     """
     # Fix already assigned indices and stabilize component setwise
@@ -140,33 +154,138 @@ def _align_known(
     return (A - cA) @ R.T + cB  # align all of A
 
 
-def _pendant_factor(
-    s1: Structure,
-) -> list[Batch]:
+@dataclass
+class Component:
+    """A component with optional parent and attachment indices.
+
+    Attributes:
+        parent_idx: The index of the parent component this component is attached to. No
+            parent_idx means this is a backbone component.
+        pool: Whether this component is a pool pendant (True) or non-pool pendant (False).
+        idxs: The indices of the atoms in this component.
+    """
+
+    parent_idx: int | None
+    pool: bool
+    idxs: np.ndarray
+
+
+Batch = list[Component]
+
+
+def component_permutations(
+    adj_dict: dict[int, list[int]],
+    base_colors: list[int],
+    fixed: np.ndarray,
+    component: Component,
+) -> Iterable[list[int]]:
+    """Aut(G)_{fixed}↾C as a local SymPy group on |C| points.
+
+    This computes the pointwise stabilizer of the fixed vertices restricted to
+    the action on C.
+
+    Parameters:
+        adj_dict: The adjacency dictionary of the structure graph.
+        coloring: The vertex coloring (partition) for the whole structure.
+        fixed: Boolean array marking fixed vertices.
+        component: The list of indices in the current component.
+
+    Returns:
+        An iterable of permutations (as lists) acting on the component indices
+        reindex to 0..|C|-1.
+    """
+    if component.pool:  # Direct permutations by element type
+        # Group by color (proxy for element types)
+        groups = defaultdict(list)
+        for i, c_idx in enumerate(component.idxs):
+            groups[base_colors[c_idx]].append(i)
+        return (
+            list(it.chain.from_iterable(combo))
+            for combo in it.product(
+                *(it.permutations(idxs) for idxs in groups.values())
+            )
+        )
+    else:  # Backbone or non-pool pendant: full setwise stabilizer
+        return _setwise_stabilizer_on_C(
+            adj_dict, base_colors, fixed, component.idxs
+        ).generate_schreier_sims(af=True)
+
+
+def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component]:
     """
     Factor the structure into a backbone + pendant groups for each element.
 
+    For now just one layer and using a dictionary to group pendants by parent atom.
+
+    Parameters:
+        s1: The structure to factor.
+        depth: The depth of pendant groups to consider (default is 1). 0 means no pendant
+            factoring (the whole structure will be considered backbone). 1 means singly
+            attached pendants only, such as methyl and methylene hydrogens or halogens.
+            2 included bi-connected substituents such as phenyl rings (which contain
+            internal symmetry) or multiple identical substituents attached to the same
+            parent atom (which also adds symmetry), such as geminal diols (-C(OH)2) or
+            other geminal substituents. Depth > 2 recursively peels more layers of
+            substituents to until the desired depth is reached or no further pendants
+            exist.
+
     Returns:
-        List of batches, where the first batch is the backbone and the subsequent batch
-            contains the pendant groups factored by their parent atom and element type.
+        Dictionary mapping parent_idx (or None for backbone) to Component.
     """
+    if depth == 0:
+        return {
+            None: Component(
+                parent_idx=None,
+                pool=False,
+                idxs=np.array(range(len(s1.symbols))),
+            )
+        }
+    
     batches = [[], []]
     # (parent_idx, symbol) -> list of atom indices
     pendant_groups: dict[tuple[int, str], list[int]] = defaultdict(list)
     backbone_indices = set(range(len(s1.symbols)))
+    factored = {}
 
     # Identify pendant groups
     adj = s1.adjacency_dict
     for atom_idx, nbrs in adj.items():
-        if len(nbrs) == 1:  # Possible duplicated pendant
-            pendant_groups[(nbrs[0], s1.symbols[atom_idx])].append(atom_idx)
+        if len(nbrs) == 1:  # Single attached pendant
+            pendant_groups[nbrs[0]].append(atom_idx)
 
     # Build batches: pendants first, then backbone. Sorting for deterministic output.
-    for group in pendant_groups.values():
-        if len(group) > 1:  # Multiple atoms in this pendant group
-            batches[1].append(sorted(group))
-            backbone_indices.difference_update(group)
-    batches[0].append(sorted(backbone_indices))
+    for parent_idx, pendant_idxs in pendant_groups.items():
+        if len(pendant_idxs) > 1:  # Multiple atoms in this pendant group
+            # Sorting by symbol for element-wise cross-structure pool matching
+            symbols = [s1.symbols[i] for i in pendant_idxs]
+            sorted_pairs = sorted(zip(symbols, pendant_idxs))
+            component = Component(
+                parent_idx=parent_idx,
+                pool=True,
+                idxs=np.array([idx for _, idx in sorted_pairs]),
+            )
+            factored[parent_idx] = component
+            backbone_indices.difference_update(pendant_idxs)
+    factored[None] = Component(
+        parent_idx=None, pool=False, idxs=np.array(sorted(backbone_indices))
+    )
+    return factored
+
+
+def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
+    """
+    Convert the factored dictionary to batches.
+
+    Returns:
+        List of batches, where the first batch is the backbone and the subsequent batch
+            contains the pendant groups.
+    """
+    batches = [[], []]
+    for parent_idx, component in factored.items():
+        if parent_idx is None:
+            batches[0].append(component)
+        else:
+            batches[1].append(component)
     return batches
 
 
@@ -174,7 +293,8 @@ def snap_rmsd(
     s1: Structure,
     s2: Structure,
     align: bool = True,
-    factor: str | Callable[[Any], list[Batch]] | None = "pendant",
+    factor: str | Callable[[Any], list[Batch]] = "pendant",
+    factor_depth: int = 1,
     backend: str = "pynauty",
     realign_per_component: bool = False,
 ) -> tuple[float, list[int]]:
@@ -204,6 +324,7 @@ def snap_rmsd(
             Default is "pendant". Factoring should return list[Batch] where each Batch
             is a list of components and each component is a list of atom indices
             corresponding to s1, e.g., [[ [0,1,2], [3,4] ], [ [5,6], [7] ]].
+        factor_depth: The depth of pendant groups to consider (default is 1).
         backend: The backend to use for automorphism computations. Default is "pynauty".
         realign_per_component: Whether to realign the structures after each factored component
             is processed. Default is False meaning that realignment is only done after
@@ -227,8 +348,8 @@ def snap_rmsd(
         raise ValueError("Structures not isomorphic. Same connectivity required.")
 
     # --- Canonical labels & initial map
-    P = np.array(_map_from_canonical_labels(pn.canon_label(A), pn.canon_label(B)))
-    fixed = np.zeros(len(s1.symbols), dtype=bool)  # track fixed indices
+    P = np.array(_map_via_canonical_labels(A, B))
+    F = np.zeros(len(s1.symbols), dtype=bool)  # track fixed indices
 
     # --- Use Nauty's coloring as base partition
     A_gens, A_mantisa, A_exponent, A_coloring, A_num_orbits = pn.autgrp(A)
@@ -239,36 +360,42 @@ def snap_rmsd(
     # --- 2. Factor batches ----------------------------------------------------------
     if isinstance(factor, str):
         if factor.lower() == "pendant":
-            batches = _pendant_factor(s1)
+            A_factored = _pendant_factor(s1, depth=factor_depth)
+            B_factored = _pendant_factor(s2, depth=factor_depth)
         else:
             raise ValueError(f"Unknown factoring method '{factor}'.")
-    elif factor is None:
-        batches = [[list(range(len(s1.symbols)))]]
     else:
-        batches = factor(s1)  # expected: list[Batch]
+        A_factored = factor(s1)  # expected: list[Batch]
 
+    batches = _factored_to_batches(A_factored)  # ensure Batch format
     # --- 3. Main control loop -----------------------------------------------------
     for b_idx, batch in enumerate(batches):
-        for c_idx, C in enumerate(map(np.array, batch)):
+        for c_idx, component in enumerate(batch):
+            C_A = np.array(component.idxs, dtype=int)
             best_rmsd = float("inf")
             best_perm: list[int] | None = None
 
             # Precompute fixed sets for this component
-            S_fixed = np.flatnonzero(fixed)
+            S_fixed = np.flatnonzero(F)
             idx2_fixed = P[S_fixed]
 
-            # Local action group on C given current 'fixed'
-            Ac_local = _setwise_stabilizer_on_C(A_adj, A_coloring, fixed, C)
+            # Get target pool B_T for this component
+            if component.pool:
+                T = B_factored[P[component.parent_idx]].idxs
+            else:
+                # Unmapped non-pool pendant or backbone: use P directly
+                # T = B_factored[None].indices  # HERE we are scrambling indices...
+                # C_B = P[C_A][perm]
+                T = P[C_A]
 
-            for perm in Ac_local.generate_schreier_sims():
-                # s2 target pool for C
-                T = _target_indices_for_component(C, P, fixed, s1, s2)
-                idx2_C = T[perm.array_form]
+            for perm in component_permutations(A_adj, A_coloring, F, component):
+                C_B = T[perm]
+                # C_B = P[C][perm]
 
                 if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
                     # score on fixed ∪ C, with a per-candidate temporary alignment
-                    S = np.concatenate([S_fixed, C])
-                    idx2 = np.concatenate([idx2_fixed, idx2_C])
+                    S = np.concatenate([S_fixed, C_A])
+                    idx2 = np.concatenate([idx2_fixed, C_B])
                     A_S = A_geom[S]
                     B_S = B_geom[idx2]
 
@@ -279,98 +406,139 @@ def snap_rmsd(
 
                 else:
                     # component-only scoring, no per-candidate alignment
-                    A_C = A_geom[C]
-                    B_C = B_geom[idx2_C]
+                    A_C = A_geom[C_A]
+                    B_C = B_geom[C_B]
                     score = compute_rmsd(A_C, B_C, align=False)
 
                 if score < best_rmsd:
                     best_rmsd = score
-                    best_perm = perm.array_form
+                    best_perm = perm
 
             # Lock-in winner permutation on C
-            P[C] = T[best_perm]
-            fixed[C] = True
+            P[C_A] = T[best_perm]
+            # P[C] = P[C][best_perm]
+            F[C_A] = True
 
             # Align first component in batch to establish common frame
-            if align and b_idx == 0 and c_idx == 0:                
-                A_geom = _align_known(A_geom, B_geom, P, fixed)
+            if align and b_idx == 0 and c_idx == 0:
+                A_geom = _align_known(A_geom, B_geom, P, F)
 
         # Batch-level global realignment; not realign to avoid duplicated effort
-        if align and not realign_per_component:
-            A_geom = _align_known(A_geom, B_geom, P, fixed)
+        if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
+            A_geom = _align_known(A_geom, B_geom, P, F)
 
-    assert np.all(fixed), "Not all indices got fixed!."  # Sanity check while debugging
+    assert np.all(F), "Not all indices got fixed!."  # Sanity check while debugging
     # Align false because already aligned in the loop if needed
     final_rmsd = compute_rmsd(A_geom, B_geom[P], align=False)
     return float(final_rmsd), P.tolist()
 
 
-def _target_indices_for_component(
-    C: np.ndarray,
-    P: np.ndarray,
-    fixed: np.ndarray,
-    s1: Structure,
-    s2: Structure,
-) -> np.ndarray:
-    """
-    Return the indices in s2 that are the *candidate target pool* for component C,
-    based on the current mapping P of C's boundary (neighbors outside C).
-    """
-    C_set = set(map(int, C))
-    # 1) boundary in s1: neighbors of C that are not in C
-    boundary = set()
-    for u in C:
-        for v in s1.adjacency_dict[int(u)]:
-            if v not in C_set:
-                boundary.add(v)
+# def randomly_reorder_structure(struct: Structure) -> Structure:
+#     # Create a random permutation of the indices
+#     n = len(struct.symbols)
+#     perm = np.random.permutation(n)  # New -> Old
 
-    # We want boundary images; ideally boundary vertices are fixed by now
-    # (typical when backbone is fixed before pendants).
-    boundary = np.array(sorted(boundary), dtype=int)
-    if boundary.size == 0:
-        print("FALLBACK! NO BOUNDARY AT ALL")
-        # fully detached component (rare); fall back to canonical pool
-        return P[C]
+#     # Build inverse: old_index -> new_index
+#     inv = np.empty(n, dtype=int)
+#     inv[perm] = np.arange(n)
 
-    # Must have mapped boundary; if some aren’t fixed yet, you can either:
-    # (a) skip them, or (b) require fixed[boundary].all()
-    # For hexane sequencing, boundary is fixed.
-    boundary_mapped = P[boundary]  # s2 indices
+#     new_symbols = []
+#     new_geometry = []
+#     new_connectivity = []
+#     for new_idx, old_idx in enumerate(perm):
+#         new_symbols.append(struct.symbols[old_idx])
+#         new_geometry.append(struct.geometry[old_idx])
 
-    # 2) Candidate pool = vertices in s2 adjacent to *all* boundary_mapped
-    # (intersection of neighbor sets), then filtered by element types of C.
-    neigh_sets = []
-    for b2 in boundary_mapped:
-        neigh_sets.append(set(s2.adjacency_dict[int(b2)]))
-    cand = set.intersection(*neigh_sets) if neigh_sets else set()
+#     # for from_idx, to_idx, bo in struct.connectivity:
+#     #     new_bond = (inv[from_idx], inv[to_idx], bo)
+#     #     new_connectivity.append(new_bond)
 
-    # filter by element types to match C's composition
-    # Build multiset of symbols for C
-    C_symbols = [s1.symbols[int(i)] for i in C]
-    # First, a simple filter: candidates with matching symbol set size
-    cand = [j for j in cand if s2.symbols[int(j)] in C_symbols]
+#     # Reindex connectivity triplets; normalize endpoints so i <= j
+#     if getattr(struct, "connectivity", None) is not None:
+#         new_conn = []
+#         for i_old, j_old, order in struct.connectivity:
+#             i_new = int(inv[int(i_old)])
+#             j_new = int(inv[int(j_old)])
+#             if i_new > j_new:
+#                 i_new, j_new = j_new, i_new
+#             new_conn.append((i_new, j_new, float(order)))
 
-    # Optional: if C has >=2 atoms, also check induced-connectivity pattern size
-    # (e.g., methyl has 3 H all connected to the same carbon only).
-    # For typical CH3 pendants, the simple adjacency-to-boundary filter is enough.
+#     # Create a new structure with the same other attributes, but updated ordering.
+#     new_struct_dict = struct.model_dump()
+#     new_struct_dict["symbols"] = new_symbols
+#     new_struct_dict["geometry"] = new_geometry
+#     new_struct_dict["connectivity"] = new_connectivity
+#     return Structure.model_validate(new_struct_dict)
 
-    # If cand is larger than len(C): typically you have exactly the k hydrogens
-    # around that mapped carbon; if not, you may refine with symbol counts.
-    # Stable order:
-    cand_sorted = np.array(sorted(cand), dtype=int)
 
-    # Expect |cand_sorted| == |C|
-    # If not equal, you can fall back to P[C] or raise for debugging.
-    if cand_sorted.size != C.size:
-        print("FALLBACK! MISMATCHED CANDIDATE POOL SIZE")
-        # Fallback (keeps things running, but you’ll lose optimality)
-        return P[C]
+import numpy as np
+from copy import deepcopy
+from typing import Any
 
-    return cand_sorted
+
+def randomly_reorder_structure(struct: "Structure") -> "Structure":
+    n = len(struct.symbols)
+    perm = np.random.permutation(n).astype(int)  # new_index -> old_index
+
+    # inverse: old_index -> new_index
+    inv = np.empty(n, dtype=int)
+    inv[perm] = np.arange(n, dtype=int)
+
+    d: dict[str, Any] = deepcopy(struct.model_dump())
+
+    # Per-atom fields (add others your graph/coloring uses)
+    d["symbols"] = [struct.symbols[old] for old in perm]
+    d["geometry"] = np.asarray(struct.geometry)[perm]
+
+    for field in ("atomic_numbers", "formal_charges", "charges", "masses"):
+        if field in d and d[field] is not None:
+            arr = np.asarray(d[field])
+            if arr.shape[0] == n:
+                # keep python types if original was list
+                d[field] = (
+                    arr[perm].tolist() if isinstance(d[field], list) else arr[perm]
+                )
+
+    # Reindex connectivity triplets; normalize endpoints so i <= j
+    if getattr(struct, "connectivity", None) is not None:
+        new_conn = []
+        for i_old, j_old, order in struct.connectivity:
+            i_new = int(inv[int(i_old)])
+            j_new = int(inv[int(j_old)])
+            if i_new > j_new:
+                i_new, j_new = j_new, i_new
+            new_conn.append((i_new, j_new, float(order)))
+        d["connectivity"] = new_conn
+
+    # Nuke any cached/serialized adjacency so it recomputes from connectivity
+    for k in (
+        "adjacency_dict",
+        "adjacency_matrix",
+        "graph",
+        "_adj_cache",
+        "_graph_cache",
+    ):
+        if k in d:
+            d[k] = None
+
+    return Structure.model_validate(d)
+
+
+def _struct_to_rustworkx_graph(struct: "Structure") -> "rx.PyGraph":
+    import rustworkx as rx
+
+    g = rx.PyGraph()
+    nodes = [g.add_node(sym) for sym in struct.symbols]
+    for i, row in enumerate(struct.adjacency_matrix):
+        for j in np.nonzero(row)[0]:
+            if i < j:  # avoid adding duplicate edges
+                g.add_edge(i, j, struct.adjacency_matrix[i, j])
+    return g
 
 
 if __name__ == "__main__":
     from time import time
+    import rustworkx as rx
 
     from qcio import Structure
     from spyrmsd.rmsd import symmrmsd
@@ -378,41 +546,65 @@ if __name__ == "__main__":
     from qcinf import smiles_to_structure
     from qcinf.algorithms.geometry import rmsd
 
-    # smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
-    smiles = "CCCCCCF"
+    def benchmark_snap(s1, s2, align=True, factor="pendant", **kwargs):
+        start = time()
+        s_rmsd, perm = snap_rmsd(s1, s2, align=align, factor=factor, **kwargs)
+        snap_time = time() - start
+        print(f"{s_rmsd:.5f}", perm)
+        print(f"snapRMSD time: {snap_time:.4f} s")
+        return s_rmsd, perm
+
+    def benchmark_rdkit(s1, s2):
+        start = time()
+        rdkit_rmsd = rmsd(s1, s2, backend="rdkit")
+        rdkit_time = time() - start
+        print(f"{rdkit_rmsd:.5f}")
+        print(f"RDKit RMSD time: {rdkit_time:.4f} s")
+        return rdkit_rmsd
+
+    def benchmark_symmrmsd(s1, s2, align=True):
+        start = time()
+        spyrmsd_rmsd = symmrmsd(
+            s1.geometry,
+            s2.geometry,
+            s1.symbols,
+            s2.symbols,
+            s1.adjacency_matrix,
+            s2.adjacency_matrix,
+            center=True,
+            minimize=align,
+            cache=False,
+        )
+        spyrmsd_rmsd_time = time() - start
+        print(f"{spyrmsd_rmsd:.5f}")
+        print(f"spyrmsd RMSD time: {spyrmsd_rmsd_time:.4f} s")
+        return spyrmsd_rmsd
+
+    # smiles = "CC1=C2[C@@]([C@]([C@H]([C@@H]3[C@]4([C@H](OC4)C[C@@H]([C@]3(C(=O)[C@@H]2OC(=O)C)C)O)OC(=O)C)OC(=O)c5ccccc5)(C[C@@H]1OC(=O)[C@H](O)[C@@H](NC(=O)c6ccccc6)c7ccccc7)O)(C)C"
+    smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
+    # smiles = "CCCCC"
     s1 = smiles_to_structure(smiles)
     s2 = smiles_to_structure(smiles)
+    # s2 = smiles_to_structure(smiles)
+    # s2 = smiles_to_structure(smiles)
+    # s2 = smiles_to_structure(smiles)
+    # s2 = smiles_to_structure(smiles)
+    s2 = randomly_reorder_structure(s2)
+    # s1.save("s1.json")
+    # s2.save("s2.json")
+    # s1 = Structure.open("s1.json")
+    # s2 = Structure.open("s2.json")
 
-    batches = _pendant_factor(s1)
-    print(batches)
-    start = time()
-    s_rmsd, perm = snap_rmsd(s1, s2, align=True, factor="pendant")
-    snap_time = time() - start
+    # g1 = rx.PyGraph.from_adjacency_matrix(s1.adjacency_matrix)
+    # g1 = _struct_to_rustworkx_graph(s1)
+    # g2 = _struct_to_rustworkx_graph(s2)
+    # assert rx.is_isomorphic(g1, g2), "Rustworkx says not isomorphic!"
 
-    start = time()
-    rdkit_rmsd = rmsd(s1, s2, backend="rdkit")
-    rdkit_time = time() - start
+    # batches = _pendant_factor(s1)
 
-    start = time()
-    spyrmsd_rmsd = symmrmsd(
-        s1.geometry,
-        s2.geometry,
-        s1.symbols,
-        s2.symbols,
-        s1.adjacency_matrix,
-        s2.adjacency_matrix,
-        center=True,
-        minimize=True,
-        cache=False,
-    )
-    spyrmsd_rmsd_time = time() - start
-
-    raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
-
-    print(s_rmsd, perm)
-    print(spyrmsd_rmsd)
-    print(rdkit_rmsd)
-    print(raw)
-    print(f"snapRMSD time: {snap_time:.4f} s")
-    print(f"spyrmsd RMSD time: {spyrmsd_rmsd_time:.4f} s")
-    print(f"RDKit RMSD time: {rdkit_time:.4f} s")
+    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor="pendant")
+    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
+    rdkit_rmsd = benchmark_rdkit(s1, s2)
+    # spyrmsd_rmsd = benchmark_symmrmsd(s1, s2, align=True)
+    # raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
+    # print(raw)

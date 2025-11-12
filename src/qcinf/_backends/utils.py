@@ -105,6 +105,10 @@ def kabsch(P: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
         centroid_P (np.ndarray): The centroid of P.
         centroid_Q (np.ndarray): The centroid of Q.
     """
+    # Ensure the arrays have the same shape and at least 3 points
+    assert P.shape == Q.shape and P.shape[0] >= 3, (
+        "Input arrays must have the same shape with at least 3 points."
+    )
     # Compute centroids
     centroid_P = np.mean(P, axis=0)
     centroid_Q = np.mean(Q, axis=0)
