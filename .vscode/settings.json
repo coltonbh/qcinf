@@ -3,6 +3,7 @@
         "addh",
         "allclose",
         "atomicnum",
+        "autgrp",
         "calccharges",
         "Cheminformatics",
         "ETKDG",

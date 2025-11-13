@@ -222,41 +222,37 @@ def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component
 
     Parameters:
         s1: The structure to factor.
-        depth: The depth of pendant groups to consider (default is 1). 0 means no pendant
+        depth: The depth of pendant groups to consider (default 1). 0 means no pendant
             factoring (the whole structure will be considered backbone). 1 means singly
-            attached pendants only, such as methyl and methylene hydrogens or halogens.
-            2 included bi-connected substituents such as phenyl rings (which contain
-            internal symmetry) or multiple identical substituents attached to the same
-            parent atom (which also adds symmetry), such as geminal diols (-C(OH)2) or
-            other geminal substituents. Depth > 2 recursively peels more layers of
-            substituents to until the desired depth is reached or no further pendants
-            exist.
+            attached pendants with siblings, such as methyl and methylene hydrogens or
+            halogens, but atoms without siblings such as hydroxyl hydrogens, or phenyl
+            hydrogens will remain in the backbone. Depth 2 includes bi-connected
+            substituents such as phenyl rings (which contain internal symmetry) or
+            multiple identical substituents attached to the same parent atom (which
+            also contains symmetry), such as geminal diols (-C(OH)2) or other geminal
+            substituents. Depth > 2 recursively peels more layers of substituents until
+            the desired depth is reached or no further pendants exist.
 
     Returns:
         Dictionary mapping parent_idx (or None for backbone) to Component.
     """
     if depth == 0:
-        return {
-            None: Component(
-                parent_idx=None,
-                pool=False,
-                idxs=np.array(range(len(s1.symbols))),
-            )
-        }
+        idxs = np.array(range(len(s1.symbols)))  # Whole structure as backbone
+        return {None: Component(parent_idx=None, pool=False, idxs=idxs)}
 
+    # Depth == 1: identify singly attached pendants
     batches = [[], []]
-    # (parent_idx, symbol) -> list of atom indices
-    pendant_groups: dict[tuple[int, str], list[int]] = defaultdict(list)
-    backbone_indices = set(range(len(s1.symbols)))
-    factored = {}
 
     # Identify pendant groups
-    adj = s1.adjacency_dict
-    for atom_idx, nbrs in adj.items():
+    pendant_groups: dict[int, list[int]] = defaultdict(list)  # (parent_idx) -> list of atom indices  # fmt: skip
+    for atom_idx, nbrs in s1.adjacency_dict.items():
         if len(nbrs) == 1:  # Single attached pendant
             pendant_groups[nbrs[0]].append(atom_idx)
 
-    # Build batches: pendants first, then backbone. Sorting for deterministic output.
+    backbone_indices = set(range(len(s1.symbols)))  # Initialize to all indices
+    factored = {}
+
+    # Build components: pendants first, then backbone. Sorting for deterministic output.
     for parent_idx, pendant_idxs in pendant_groups.items():
         if len(pendant_idxs) > 1:  # Multiple atoms in this pendant group
             # Sorting by symbol for element-wise cross-structure pool matching
@@ -269,6 +265,8 @@ def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component
             )
             factored[parent_idx] = component
             backbone_indices.difference_update(pendant_idxs)
+
+    # Add backbone component
     factored[None] = Component(
         parent_idx=None, pool=False, idxs=np.array(sorted(backbone_indices))
     )
@@ -290,6 +288,27 @@ def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
         else:
             batches[1].append(component)
     return batches
+
+
+def _score_fixed_plus_component(
+    A_geom: np.ndarray,
+    B_geom: np.ndarray,
+    P: np.ndarray,
+    A_C: np.ndarray,
+    A_fixed: np.ndarray,
+    B_idx_perm: np.ndarray,
+) -> float:
+    """Compute RMSD after aligning A to B using fixed + component indices."""
+    # score on fixed ∪ C, with a per-candidate temporary alignment
+    A_idx_fixed = np.flatnonzero(A_fixed)
+    A_fixed_plus_C = np.concatenate([A_idx_fixed, A_C])
+    B_fixed_plus_C = np.concatenate([P[A_idx_fixed], B_idx_perm])
+
+    # Align only the selected subset; faster than _align_known on full structure
+    A_sel = A_geom[A_fixed_plus_C]
+    B_sel = B_geom[B_fixed_plus_C]
+    R, cA, cB = kabsch(A_sel, B_sel)
+    return compute_rmsd((A_sel - cA) @ R.T + cB, B_sel, align=False)
 
 
 def snap_rmsd(
@@ -352,13 +371,13 @@ def snap_rmsd(
 
     # --- Canonical labels & initial map
     P = np.array(_map_via_canonical_labels(A, B))
-    F = np.zeros(len(s1.symbols), dtype=bool)  # track fixed indices
+    A_fixed = np.zeros(len(s1.symbols), dtype=bool)  # track fixed indices
 
-    # --- Use Nauty's coloring as base partition
+    # --- Compute automorphism group of A
     A_gens, A_mantisa, A_exponent, A_coloring, A_num_orbits = pn.autgrp(A)
 
-    A_geom = s1.geometry.copy()
-    B_geom = s2.geometry.copy()
+    A_geom = s1.geometry.copy()  # Mutable copy for alignment
+    B_geom = s2.geometry  # Read-only
 
     # --- 2. Factor batches ----------------------------------------------------------
     if isinstance(factor, str):
@@ -369,67 +388,64 @@ def snap_rmsd(
             raise ValueError(f"Unknown factoring method '{factor}'.")
     else:
         A_factored = factor(s1)  # expected: list[Batch]
-
     batches = _factored_to_batches(A_factored)  # ensure Batch format
+
     # --- 3. Main control loop -----------------------------------------------------
     for b_idx, batch in enumerate(batches):
         for c_idx, component in enumerate(batch):
-            A_C = np.array(component.idxs, dtype=int)
             best_rmsd = float("inf")
             best_perm: list[int] | None = None
+            A_C = component.idxs
 
-            # Precompute fixed sets for this component; just pulled up for efficiency
-            S_fixed = np.flatnonzero(F)
-            idx2_fixed = P[S_fixed]
+            # TODO: Need to make sure component idxs are in canonical order, I think!
+            # if component.parent_idx is None:  # Backbone component
+            #     B_C = B_factored[None].idxs
+            # else: # Pendant components
+            #     B_C = B_factored[P[component.parent_idx]].idxs
 
-            # Get target pool B_T for this component
-            if component.pool:
-                T = B_factored[P[component.parent_idx]].idxs
+            # Get corresponding B_C for this component
+            if component.pool:  # Parent may have been remapped
+                B_C = B_factored[P[component.parent_idx]].idxs
+            # TODO: I think this is wrong. We'll need to do a lookup of the parent component
+            # except for just backbone components, which can use the same lookup via None...
+            # There's something to do with order here that matters. Order for the pool was
+            # critical. For non-pool I'm not sure if we can somehow use the original canonical
+            # order or something else... But I think we will need to look up the parent component
+            # and find its indices in B to get the correct B_C.
             else:
-                # Unmapped non-pool pendant or backbone: use P directly
-                T = P[A_C]
+                # Non-pool pendant or backbone: use P directly
+                B_C = P[A_C]
 
-            for perm in component_permutations(A_adj, A_coloring, F, component):
-                B_C = T[perm]
+            for perm in component_permutations(A_adj, A_coloring, A_fixed, component):
+                B_idx_perm = B_C[perm]
 
                 if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
-                    # score on fixed ∪ C, with a per-candidate temporary alignment
-                    S = np.concatenate([S_fixed, A_C])
-                    idx2 = np.concatenate([idx2_fixed, B_C])
-                    A_S = A_geom[S]
-                    B_S = B_geom[idx2]
-
-                    # Align only a the selected subset; faster than _align_known full align
-                    R, cA_S, cB_S = kabsch(A_S, B_S)
-                    A_S_aligned = (A_S - cA_S) @ R.T + cB_S
-                    score = compute_rmsd(A_S_aligned, B_S, align=False)
-
+                    # Align per-candidate; use fixed + component indices
+                    score = _score_fixed_plus_component(A_geom, B_geom, P, A_C, A_fixed, B_idx_perm)  # fmt: skip
                 else:
-                    # component-only scoring, no per-candidate alignment
-                    A_S = A_geom[A_C]
-                    B_S = B_geom[B_C]
-                    score = compute_rmsd(A_S, B_S, align=False)
+                    # No alignment; direct RMSD on component given established frame
+                    score = compute_rmsd(A_geom[A_C], B_geom[B_idx_perm], align=False)
 
                 if score < best_rmsd:
                     best_rmsd = score
                     best_perm = perm
 
-            # Lock-in winner permutation on C
-            P[A_C] = T[best_perm]
-            F[A_C] = True
+            # Lock-in best permutation for this component
+            P[A_C] = B_C[best_perm]
+            A_fixed[A_C] = True
 
-            # Align first component in batch to establish common frame
+            # Establish common reference frame after first component in first batch
             if align and b_idx == 0 and c_idx == 0:
-                A_geom = _align_known(A_geom, B_geom, P, F)
+                A_geom = _align_known(A_geom, B_geom, P, A_fixed)
 
         # Batch-level global realignment; avoid duplicate alignments
         if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
-            A_geom = _align_known(A_geom, B_geom, P, F)
+            A_geom = _align_known(A_geom, B_geom, P, A_fixed)
 
-    assert np.all(F), "Not all indices got fixed!."  # Sanity check while debugging
+    assert np.all(A_fixed), "Not all indices got fixed!."  # Sanity check
     count = Counter(P)
     assert all(v == 1 for v in count.values()), "P is not a valid permutation!"  # Sanity check while debugging # fmt: skip
-    # Align false because already aligned in the loop if needed
+    # Align false because already aligned at the end of the last batch if needed
     final_rmsd = compute_rmsd(A_geom, B_geom[P], align=False)
     return float(final_rmsd), P.tolist()
 
@@ -470,7 +486,6 @@ def snap_rmsd(
 #     new_struct_dict["geometry"] = new_geometry
 #     new_struct_dict["connectivity"] = new_connectivity
 #     return Structure.model_validate(new_struct_dict)
-
 
 
 def randomly_reorder_structure(struct: "Structure") -> "Structure":
@@ -558,8 +573,8 @@ if __name__ == "__main__":
         return spyrmsd_rmsd
 
     # smiles = "CC1=C2[C@@]([C@]([C@H]([C@@H]3[C@]4([C@H](OC4)C[C@@H]([C@]3(C(=O)[C@@H]2OC(=O)C)C)O)OC(=O)C)OC(=O)c5ccccc5)(C[C@@H]1OC(=O)[C@H](O)[C@@H](NC(=O)c6ccccc6)c7ccccc7)O)(C)C"
-    # smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
-    smiles = "CCCCC"
+    smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
+    # smiles = "CCCCC"
     s1 = smiles_to_structure(smiles)
     s2 = smiles_to_structure(smiles)
     # s2 = smiles_to_structure(smiles)
@@ -578,10 +593,12 @@ if __name__ == "__main__":
     # assert rx.is_isomorphic(g1, g2), "Rustworkx says not isomorphic!"
 
     # batches = _pendant_factor(s1)
-
-    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor="pendant")
-    # s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
+    s_rmsd, perm = benchmark_snap(
+        s1, s2, align=True, factor="pendant", realign_per_component=True
+    )
+    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
     rdkit_rmsd = benchmark_rdkit(s1, s2)
     # spyrmsd_rmsd = benchmark_symmrmsd(s1, s2, align=True)
     # raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
     # print(raw)
+    # Compare s1_geom to s1.geometry to ensure no mutation
