@@ -2038,7 +2038,7 @@ requires-dist = [
     { name = "pydantic", specifier = "~=2.0,!=2.0.1,!=2.1.0" },
     { name = "pynauty", specifier = ">=2.8.8.1" },
     { name = "qcconst", specifier = ">=0.2.1" },
-    { name = "qcio", directory = "../qcio" },
+    { name = "qcio", editable = "../qcio" },
     { name = "rdkit", marker = "extra == 'all'", specifier = ">=2024.9.6" },
     { name = "rdkit", marker = "extra == 'rdkit'", specifier = ">=2024.9.6" },
     { name = "sympy", specifier = ">=1.14.0" },
@@ -2060,7 +2060,7 @@ dev = [
 [[package]]
 name = "qcio"
 version = "0.16.1"
-source = { directory = "../qcio" }
+source = { editable = "../qcio" }
 dependencies = [
     { name = "eval-type-backport" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

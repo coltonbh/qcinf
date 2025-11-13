@@ -1,7 +1,8 @@
 import itertools as it
-from collections import defaultdict
+from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 import pynauty as pn
@@ -199,6 +200,8 @@ def component_permutations(
         groups = defaultdict(list)
         for i, c_idx in enumerate(component.idxs):
             groups[base_colors[c_idx]].append(i)
+        # e.g., -CH2F -> [[0,1],[2]] -> permutations of [0,1] cross [2]
+        # which yields [[0,1,2], [1,0,2]] for the full component
         return (
             list(it.chain.from_iterable(combo))
             for combo in it.product(
@@ -240,7 +243,7 @@ def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component
                 idxs=np.array(range(len(s1.symbols))),
             )
         }
-    
+
     batches = [[], []]
     # (parent_idx, symbol) -> list of atom indices
     pendant_groups: dict[tuple[int, str], list[int]] = defaultdict(list)
@@ -371,11 +374,11 @@ def snap_rmsd(
     # --- 3. Main control loop -----------------------------------------------------
     for b_idx, batch in enumerate(batches):
         for c_idx, component in enumerate(batch):
-            C_A = np.array(component.idxs, dtype=int)
+            A_C = np.array(component.idxs, dtype=int)
             best_rmsd = float("inf")
             best_perm: list[int] | None = None
 
-            # Precompute fixed sets for this component
+            # Precompute fixed sets for this component; just pulled up for efficiency
             S_fixed = np.flatnonzero(F)
             idx2_fixed = P[S_fixed]
 
@@ -384,50 +387,48 @@ def snap_rmsd(
                 T = B_factored[P[component.parent_idx]].idxs
             else:
                 # Unmapped non-pool pendant or backbone: use P directly
-                # T = B_factored[None].indices  # HERE we are scrambling indices...
-                # C_B = P[C_A][perm]
-                T = P[C_A]
+                T = P[A_C]
 
             for perm in component_permutations(A_adj, A_coloring, F, component):
-                C_B = T[perm]
-                # C_B = P[C][perm]
+                B_C = T[perm]
 
                 if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
                     # score on fixed ∪ C, with a per-candidate temporary alignment
-                    S = np.concatenate([S_fixed, C_A])
-                    idx2 = np.concatenate([idx2_fixed, C_B])
+                    S = np.concatenate([S_fixed, A_C])
+                    idx2 = np.concatenate([idx2_fixed, B_C])
                     A_S = A_geom[S]
                     B_S = B_geom[idx2]
 
-                    # do NOT mutate G1_geom here; align the subset temporarily
+                    # Align only a the selected subset; faster than _align_known full align
                     R, cA_S, cB_S = kabsch(A_S, B_S)
                     A_S_aligned = (A_S - cA_S) @ R.T + cB_S
                     score = compute_rmsd(A_S_aligned, B_S, align=False)
 
                 else:
                     # component-only scoring, no per-candidate alignment
-                    A_C = A_geom[C_A]
-                    B_C = B_geom[C_B]
-                    score = compute_rmsd(A_C, B_C, align=False)
+                    A_S = A_geom[A_C]
+                    B_S = B_geom[B_C]
+                    score = compute_rmsd(A_S, B_S, align=False)
 
                 if score < best_rmsd:
                     best_rmsd = score
                     best_perm = perm
 
             # Lock-in winner permutation on C
-            P[C_A] = T[best_perm]
-            # P[C] = P[C][best_perm]
-            F[C_A] = True
+            P[A_C] = T[best_perm]
+            F[A_C] = True
 
             # Align first component in batch to establish common frame
             if align and b_idx == 0 and c_idx == 0:
                 A_geom = _align_known(A_geom, B_geom, P, F)
 
-        # Batch-level global realignment; not realign to avoid duplicated effort
+        # Batch-level global realignment; avoid duplicate alignments
         if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
             A_geom = _align_known(A_geom, B_geom, P, F)
 
     assert np.all(F), "Not all indices got fixed!."  # Sanity check while debugging
+    count = Counter(P)
+    assert all(v == 1 for v in count.values()), "P is not a valid permutation!"  # Sanity check while debugging # fmt: skip
     # Align false because already aligned in the loop if needed
     final_rmsd = compute_rmsd(A_geom, B_geom[P], align=False)
     return float(final_rmsd), P.tolist()
@@ -471,10 +472,6 @@ def snap_rmsd(
 #     return Structure.model_validate(new_struct_dict)
 
 
-import numpy as np
-from copy import deepcopy
-from typing import Any
-
 
 def randomly_reorder_structure(struct: "Structure") -> "Structure":
     n = len(struct.symbols)
@@ -490,15 +487,6 @@ def randomly_reorder_structure(struct: "Structure") -> "Structure":
     d["symbols"] = [struct.symbols[old] for old in perm]
     d["geometry"] = np.asarray(struct.geometry)[perm]
 
-    for field in ("atomic_numbers", "formal_charges", "charges", "masses"):
-        if field in d and d[field] is not None:
-            arr = np.asarray(d[field])
-            if arr.shape[0] == n:
-                # keep python types if original was list
-                d[field] = (
-                    arr[perm].tolist() if isinstance(d[field], list) else arr[perm]
-                )
-
     # Reindex connectivity triplets; normalize endpoints so i <= j
     if getattr(struct, "connectivity", None) is not None:
         new_conn = []
@@ -509,17 +497,6 @@ def randomly_reorder_structure(struct: "Structure") -> "Structure":
                 i_new, j_new = j_new, i_new
             new_conn.append((i_new, j_new, float(order)))
         d["connectivity"] = new_conn
-
-    # Nuke any cached/serialized adjacency so it recomputes from connectivity
-    for k in (
-        "adjacency_dict",
-        "adjacency_matrix",
-        "graph",
-        "_adj_cache",
-        "_graph_cache",
-    ):
-        if k in d:
-            d[k] = None
 
     return Structure.model_validate(d)
 
@@ -538,8 +515,8 @@ def _struct_to_rustworkx_graph(struct: "Structure") -> "rx.PyGraph":
 
 if __name__ == "__main__":
     from time import time
-    import rustworkx as rx
 
+    import rustworkx as rx
     from qcio import Structure
     from spyrmsd.rmsd import symmrmsd
 
@@ -581,8 +558,8 @@ if __name__ == "__main__":
         return spyrmsd_rmsd
 
     # smiles = "CC1=C2[C@@]([C@]([C@H]([C@@H]3[C@]4([C@H](OC4)C[C@@H]([C@]3(C(=O)[C@@H]2OC(=O)C)C)O)OC(=O)C)OC(=O)c5ccccc5)(C[C@@H]1OC(=O)[C@H](O)[C@@H](NC(=O)c6ccccc6)c7ccccc7)O)(C)C"
-    smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
-    # smiles = "CCCCC"
+    # smiles = "FC(F)(F)C1=CC(=CC(NC(=O)NC2=CC(=CC(=C2)C(F)(F)F)C(F)(F)F)=C1)C(F)(F)F"
+    smiles = "CCCCC"
     s1 = smiles_to_structure(smiles)
     s2 = smiles_to_structure(smiles)
     # s2 = smiles_to_structure(smiles)
@@ -603,7 +580,7 @@ if __name__ == "__main__":
     # batches = _pendant_factor(s1)
 
     s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor="pendant")
-    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
+    # s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
     rdkit_rmsd = benchmark_rdkit(s1, s2)
     # spyrmsd_rmsd = benchmark_symmrmsd(s1, s2, align=True)
     # raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
