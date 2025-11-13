@@ -7,8 +7,10 @@ authors = [{ name = "Colton Hicks", email = "github@coltonhicks.com" }]
 requires-python = ">=3.10"
 dependencies = [
     "pydantic~=2.0,!=2.0.1,!=2.1.0",
+    "pynauty>=2.8.8.1",
     "qcconst>=0.2.1",
-    "qcio>=0.14.0",
+    "qcio",
+    "sympy>=1.14.0",
     "typing-extensions>=4.12.2",
 ]
 classifiers = [
@@ -44,6 +46,7 @@ dev = [
     "openbabel-wheel>=3.1.1.21",
     "rdkit>=2024.9.6",
     "types-toml>=0.10.8.20240310",
+    "jupyterlab>=4.4.4",
 ]
 
 [project.optional-dependencies]
@@ -81,3 +84,6 @@ filterwarnings = [
     "ignore:builtin type SwigPy.*has no __module__ attribute:DeprecationWarning",
     "ignore:builtin type swigvarlink.*has no __module__ attribute:DeprecationWarning",
 ]
+
+[tool.uv.sources]
+qcio = { path = "../qcio", editable = true }
