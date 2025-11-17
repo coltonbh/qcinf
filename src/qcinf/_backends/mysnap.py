@@ -2,7 +2,7 @@ import itertools as it
 from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Iterable
 
 import numpy as np
 import pynauty as pn
@@ -34,7 +34,7 @@ def _list_of_sets(coloring: list[Any]) -> list[set[Any]]:
     return [buckets[colors] for colors in ordered_colors]
 
 
-def _to_pynauty_graph(adj_dict: dict[int : list[int]], coloring: list[Any]) -> pn.Graph:
+def _to_pynauty_graph(adj_dict: dict[int, list[int]], coloring: list[Any]) -> pn.Graph:
     """
     Convert a qcio Structure to a pynauty Graph.
 
@@ -54,7 +54,7 @@ def _to_pynauty_graph(adj_dict: dict[int : list[int]], coloring: list[Any]) -> p
 
 
 def _component_partition(
-    coloring: list[int], fixed: np.ndarray, C: Sequence[int]
+    coloring: list[int], P_opt: np.ndarray, C: np.ndarray
 ) -> list[int]:
     """
     Start from base_colors (e.g., Nauty coloring). Encode:
@@ -65,7 +65,7 @@ def _component_partition(
     next_id = max(new_coloring) + 1
 
     # Promote fixed to unique colors (singletons)
-    for i, is_fixed in enumerate(fixed):
+    for i, is_fixed in enumerate(P_opt != -1):
         if is_fixed:
             new_coloring[i] = next_id
             next_id += 1
@@ -89,16 +89,16 @@ def _map_via_canonical_labels(
         canX[i_canon] = i_orig.
     """
     canA, canB = pn.canon_label(A), pn.canon_label(B)
-    inv1 = [0] * len(canA)  # inv(can1): orig1 -> canon
+    invA = [0] * len(canA)  # inv(can1): orig1 -> canon
     for i_canon, i_orig1 in enumerate(canA):
-        inv1[i_orig1] = i_canon
+        invA[i_orig1] = i_canon
     # P[i_orig1] = can2[canon_of_i_orig1]
-    return [canB[inv1[i_orig1]] for i_orig1 in range(len(canA))]
+    return [canB[invA[i_orig1]] for i_orig1 in range(len(canA))]
 
 
 def _restrict_global_generators_to_C(
     gens_global: list[list[int]],
-    C: list[int],
+    C: np.ndarray,
 ) -> list[Permutation]:
     """
     Restrict each global generator (array form on 0..n-1) to a k-point
@@ -122,8 +122,8 @@ def _restrict_global_generators_to_C(
 def _setwise_stabilizer_on_C(
     adj_dict: dict[int, list[int]],
     base_colors: list[int],
-    fixed: np.ndarray,
-    C: Sequence[int],
+    P_opt: np.ndarray,
+    C: np.ndarray,
 ) -> PermutationGroup:
     """(Aut(G)_(fixed))_{C}↾C as a local SymPy group on |C| points.
 
@@ -133,11 +133,11 @@ def _setwise_stabilizer_on_C(
     Parameters:
         adj_dict: The adjacency dictionary of the structure graph.
         coloring: The vertex coloring (partition) for the whole structure.
-        fixed: Boolean array marking fixed vertices.
+        P_opt: Partial mapping of structure indices; -1 means unfixed.
         component: The list of indices in the current component.
     """
     # Fix already assigned indices and stabilize component setwise
-    colors = _component_partition(base_colors, fixed, C)
+    colors = _component_partition(base_colors, P_opt, C)
     G_c = _to_pynauty_graph(adj_dict, colors)
     gens, *_ = pn.autgrp(G_c)
     # Restrict to C
@@ -145,13 +145,10 @@ def _setwise_stabilizer_on_C(
     return PermutationGroup(*local_gens)
 
 
-def _align_known(
-    A: np.ndarray, B: np.ndarray, P: np.ndarray, fixed: np.ndarray
-) -> np.ndarray:
+def _align_fixed(A: np.ndarray, B: np.ndarray, P_opt: np.ndarray) -> np.ndarray:
     """Return a copy of A aligned to B using pairs (i -> P[i]) for i with fixed[i]."""
-    S = np.flatnonzero(fixed)
-    idx2 = P[S]
-    R, cA, cB = kabsch(A[S], B[idx2])
+    fixed = P_opt != -1
+    R, cA, cB = kabsch(A[fixed], B[P_opt[fixed]])
     return (A - cA) @ R.T + cB  # align all of A
 
 
@@ -177,7 +174,7 @@ Batch = list[Component]
 def component_permutations(
     adj_dict: dict[int, list[int]],
     base_colors: list[int],
-    fixed: np.ndarray,
+    P_opt: np.ndarray,
     component: Component,
 ) -> Iterable[list[int]]:
     """Aut(G)_{fixed}↾C as a local SymPy group on |C| points.
@@ -188,7 +185,7 @@ def component_permutations(
     Parameters:
         adj_dict: The adjacency dictionary of the structure graph.
         coloring: The vertex coloring (partition) for the whole structure.
-        fixed: Boolean array marking fixed vertices.
+        P_opt: Partial mapping of structure indices; -1 means unfixed.
         component: The list of indices in the current component.
 
     Returns:
@@ -210,7 +207,7 @@ def component_permutations(
         )
     else:  # Backbone or non-pool pendant: full setwise stabilizer
         return _setwise_stabilizer_on_C(
-            adj_dict, base_colors, fixed, component.idxs
+            adj_dict, base_colors, P_opt, component.idxs
         ).generate_schreier_sims(af=True)
 
 
@@ -241,8 +238,6 @@ def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component
         return {None: Component(parent_idx=None, pool=False, idxs=idxs)}
 
     # Depth == 1: identify singly attached pendants
-    batches = [[], []]
-
     # Identify pendant groups
     pendant_groups: dict[int, list[int]] = defaultdict(list)  # (parent_idx) -> list of atom indices  # fmt: skip
     for atom_idx, nbrs in s1.adjacency_dict.items():
@@ -250,7 +245,7 @@ def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component
             pendant_groups[nbrs[0]].append(atom_idx)
 
     backbone_indices = set(range(len(s1.symbols)))  # Initialize to all indices
-    factored = {}
+    factored: dict[int | None, Component] = {}
 
     # Build components: pendants first, then backbone. Sorting for deterministic output.
     for parent_idx, pendant_idxs in pendant_groups.items():
@@ -281,7 +276,7 @@ def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
         List of batches, where the first batch is the backbone and the subsequent batch
             contains the pendant groups.
     """
-    batches = [[], []]
+    batches: list[list[Component]] = [[], []]
     for parent_idx, component in factored.items():
         if parent_idx is None:
             batches[0].append(component)
@@ -290,32 +285,188 @@ def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
     return batches
 
 
-def _score_fixed_plus_component(
+def _align_and_score_fixed_plus_component(
     A_geom: np.ndarray,
     B_geom: np.ndarray,
-    P: np.ndarray,
+    P_opt: np.ndarray,
     A_C: np.ndarray,
-    A_fixed: np.ndarray,
     B_idx_perm: np.ndarray,
 ) -> float:
     """Compute RMSD after aligning A to B using fixed + component indices."""
     # score on fixed ∪ C, with a per-candidate temporary alignment
-    A_idx_fixed = np.flatnonzero(A_fixed)
+    A_idx_fixed = np.flatnonzero(P_opt != -1)
     A_fixed_plus_C = np.concatenate([A_idx_fixed, A_C])
-    B_fixed_plus_C = np.concatenate([P[A_idx_fixed], B_idx_perm])
+    B_fixed_plus_C = np.concatenate([P_opt[A_idx_fixed], B_idx_perm])
 
     # Align only the selected subset; faster than _align_known on full structure
-    A_sel = A_geom[A_fixed_plus_C]
-    B_sel = B_geom[B_fixed_plus_C]
-    R, cA, cB = kabsch(A_sel, B_sel)
-    return compute_rmsd((A_sel - cA) @ R.T + cB, B_sel, align=False)
+    return compute_rmsd(A_geom[A_fixed_plus_C], B_geom[B_fixed_plus_C], align=True)
+
+
+# def validate_factoring(
+#     s: Structure,
+#     batches_raw: list[list[list[int]]] | None,
+# ) -> list[Batch]:
+#     """
+#     Validate a user-supplied factoring and convert it into an execution plan.
+
+#     Parameters
+#     ----------
+#     s
+#         Structure A whose indices the factoring refers to.
+#     batches_raw
+#         List of batches; each batch is a list of components; each component is a
+#         list of atom indices. batches_raw[0] is assumed to be the backbone batch.
+
+#     Returns
+#     -------
+#     batches : list[Batch]
+#         Execution-plan batches where each Batch is a list[Component].
+#         - Batch 0: exactly one backbone Component with parent_idx=None.
+#         - Batches 1..: Components merged by parent attachment index.
+
+#     Raises
+#     ------
+#     ValueError
+#         If indices are out of range, duplicated, missing, or components
+#         (except the backbone) do not have exactly one out-of-component attachment.
+#     """
+#     n_atoms = len(s.symbols)
+#     adj = s.adjacency_dict
+
+#     if not batches_raw:
+#         # Default: whole structure is a single backbone component
+#         backbone = Component(
+#             parent_idx=None,
+#             pool=False,
+#             idxs=np.arange(n_atoms, dtype=int),
+#         )
+#         return [[[backbone]]]
+
+#     # --- Global index validation ----------------------------------------------------
+#     seen: set[int] = set()
+#     for b_idx, batch in enumerate(batches_raw):
+#         for c_idx, comp in enumerate(batch):
+#             for idx in comp:
+#                 if idx < 0 or idx >= n_atoms:
+#                     raise ValueError(
+#                         f"Index {idx} in batch {b_idx}, component {c_idx} "
+#                         f"out of range for structure with {n_atoms} atoms."
+#                     )
+#                 if idx in seen:
+#                     raise ValueError(
+#                         f"Index {idx} appears in multiple components "
+#                         f"(batch {b_idx}, component {c_idx})."
+#                     )
+#                 seen.add(idx)
+
+#     if seen != set(range(n_atoms)):
+#         missing = set(range(n_atoms)) - seen
+#         raise ValueError(
+#             f"Factoring does not cover the structure cleanly: missing indices {sorted(missing)}"
+#         )
+
+#     # --- Backbone (component 0) --------------------------------------------------
+#     proposed_backbone = batches_raw[0][0]
+#     if len(proposed_backbone) < 3:
+#         raise ValueError(
+#             "Backbone component must have at least 3 atoms to define a reference frame."
+#         )
+#     backbone_idxs = np.array(sorted(batches_raw[0][0]), dtype=int)
+#     backbone_component = Component(
+#         parent_idx=None,
+#         pool=False,
+#         idxs=backbone_idxs,
+#     )
+
+#     batches: list[Batch] = [[backbone_component]]
+
+#     # --- Pendant batches (components 1+...) ---------------------------------------------
+#     for b_idx, batch in enumerate(batches_raw):
+#         # Group components by parent index
+#         parent_to_indices: dict[int, list[int]] = defaultdict(list)
+
+#         for c_idx, comp in enumerate(batch):
+#             if b_idx == 0 and c_idx == 0:
+#                 continue  # skip backbone component already processed
+
+#             comp_set = set(comp)
+#             parents: set[int] = set()
+
+#             # Find all out-of-component neighbors
+#             for idx in comp:
+#                 for nbr in adj[idx]:
+#                     if nbr not in comp_set:
+#                         parents.add(nbr)
+
+#             if not parents:
+#                 raise ValueError(f"Component (batch {b_idx}, component {c_idx}) has no out-of-component attachment; expected exactly one parent.")  # fmt: skip
+#             if len(parents) > 1:
+#                 raise ValueError(f"Component (batch {b_idx}, component {c_idx}) has multiple parents {sorted(parents)}; factoring must be singly anchored.")  # fmt: skip
+
+#             parent_idx = parents.pop()
+#             parent_to_indices[parent_idx].extend(comp)
+
+#         # Merge components that share the same parent
+#         batch_components: Batch = []
+#         for parent_idx, idxs in parent_to_indices.items():
+#             uniq_sorted = np.array(sorted(set(idxs)), dtype=int)
+#             batch_components.append(
+#                 Component(
+#                     parent_idx=parent_idx,
+#                     pool=False,  # we'll detect pool vs structured at runtime
+#                     idxs=uniq_sorted,
+#                 )
+#             )
+
+#         batches.append(batch_components)
+
+#     return batches
+
+# def validate_factoring(
+#     s: Structure,
+#     batches_raw: list[list[list[int]]] | None,
+# ) -> list[Batch]:
+#     """
+#     Validate a user-supplied factoring and convert it into an execution plan.
+
+#     Parameters
+#     ----------
+#     s
+#         Structure A whose indices the factoring refers to.
+#     batches_raw
+#         List of batches; each batch is a list of components; each component is a
+#         list of atom indices. batches_raw[0] is assumed to be the backbone batch.
+
+#     Returns
+#     -------
+#     batches : list[Batch]
+#         Execution-plan batches where each Batch is a list[Component].
+#         - Batch 0: exactly one backbone Component with parent_idx=None.
+#         - Batches 1..: Components merged by parent attachment index.
+#     Raises
+#     ------
+#     ValueError
+#         If indices are out of range, duplicated, missing, or components
+#         (except the backbone) do not have exactly one out-of-component attachment.
+#     """
+#     if batches_raw is None:
+#         # Default: whole structure is a single backbone component
+#         idxs = np.array(range(len(s.symbols)))  # Whole structure as backbone
+#         backbone = Component(parent_idx=None, pool=False, idxs=idxs)
+#         return [[[backbone]]]
+
+#     for b_idx, batch in enumerate(batches_raw):
+#         for c_idx, comp in enumerate(batch):
+#             for idx in comp:
+#                 if idx < 0 or idx >= len(s.symbols):
+#                     raise ValueError(f"Index {idx} in batch {b_idx}, component {c_idx} out of range for structure with {len(s.symbols)} atoms.")  # fmt: skip
 
 
 def snap_rmsd(
     s1: Structure,
     s2: Structure,
     align: bool = True,
-    factor: str | Callable[[Any], list[Batch]] = "pendant",
+    factor: str | dict[int | None, Component] = "pendant",
     factor_depth: int = 1,
     backend: str = "pynauty",
     realign_per_component: bool = False,
@@ -357,9 +508,11 @@ def snap_rmsd(
         (float, P_opt): The computed snapRMSD value and the optimal permutation as a
             list of indices for s1 onto s2.
     """
-    # --- 1. Build graphs, canonical labels map, compute automorphism group -----------
-    # NOTE: Currently running nauty 3x on G1 2x on G2: once for generators, once for canon label,
-    #  once for isomorphism check. Can optimize this.
+    # --- 1. Build graphs, canonical label map, compute automorphism group -----------
+    # NOTE: Currently running nauty 3x on A and 2x on B. Can optimize?
+    #   - Once per graph for isomorphism check
+    #   - Once per graph for canonical labels
+    #   - Once for A to get automorphism group
 
     # --- Graphs & isomorphism check
     A_adj = s1.adjacency_dict  # compute once since used multiple times
@@ -370,14 +523,13 @@ def snap_rmsd(
         raise ValueError("Structures not isomorphic. Same connectivity required.")
 
     # --- Canonical labels & initial map
-    P = np.array(_map_via_canonical_labels(A, B))
-    A_fixed = np.zeros(len(s1.symbols), dtype=bool)  # track fixed indices
+    M = np.array(_map_via_canonical_labels(A, B))
+    P_opt = np.full(len(s1.symbols), -1, dtype=int)  # placeholder for final map
 
     # --- Compute automorphism group of A
-    A_gens, A_mantisa, A_exponent, A_coloring, A_num_orbits = pn.autgrp(A)
-
-    A_geom = s1.geometry.copy()  # Mutable copy for alignment
-    B_geom = s2.geometry  # Read-only
+    A_gens, A_mantissa, A_exponent, A_coloring, A_num_orbits = pn.autgrp(A)
+    A_geom = s1.geometry  # Will not mutate s1.geometry
+    B_geom = s2.geometry  # Will not mutate s2.geometry
 
     # --- 2. Factor batches ----------------------------------------------------------
     if isinstance(factor, str):
@@ -387,7 +539,7 @@ def snap_rmsd(
         else:
             raise ValueError(f"Unknown factoring method '{factor}'.")
     else:
-        A_factored = factor(s1)  # expected: list[Batch]
+        A_factored = factor
     batches = _factored_to_batches(A_factored)  # ensure Batch format
 
     # --- 3. Main control loop -----------------------------------------------------
@@ -396,7 +548,6 @@ def snap_rmsd(
             best_rmsd = float("inf")
             best_perm: list[int] | None = None
             A_C = component.idxs
-
             # TODO: Need to make sure component idxs are in canonical order, I think!
             # if component.parent_idx is None:  # Backbone component
             #     B_C = B_factored[None].idxs
@@ -404,24 +555,24 @@ def snap_rmsd(
             #     B_C = B_factored[P[component.parent_idx]].idxs
 
             # Get corresponding B_C for this component
-            if component.pool:  # Parent may have been remapped
-                B_C = B_factored[P[component.parent_idx]].idxs
-            # TODO: I think this is wrong. We'll need to do a lookup of the parent component
-            # except for just backbone components, which can use the same lookup via None...
-            # There's something to do with order here that matters. Order for the pool was
-            # critical. For non-pool I'm not sure if we can somehow use the original canonical
-            # order or something else... But I think we will need to look up the parent component
-            # and find its indices in B to get the correct B_C.
-            else:
-                # Non-pool pendant or backbone: use P directly
-                B_C = P[A_C]
+            p_idx = component.parent_idx
+            if p_idx is None or P_opt[p_idx] == M[p_idx]:  # Backbone component or parent not remapped  # fmt: skip
+                B_C = M[A_C]  # Initial canonical map still valid
+            elif component.pool:  # Remapped pool pendant
+                # Currently implemented in factored ordering; need to change to dynamic mapping here
+                B_C = B_factored[P_opt[component.parent_idx]].idxs
+            else:  # Remapped structured pendant
+                # Implement with nauty canonical maps on local subgraphs rooted at parent_idx
+                raise NotImplementedError(
+                    "Remapped structured pendants not yet implemented."
+                )
 
-            for perm in component_permutations(A_adj, A_coloring, A_fixed, component):
+            for perm in component_permutations(A_adj, A_coloring, P_opt, component):
                 B_idx_perm = B_C[perm]
 
                 if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
                     # Align per-candidate; use fixed + component indices
-                    score = _score_fixed_plus_component(A_geom, B_geom, P, A_C, A_fixed, B_idx_perm)  # fmt: skip
+                    score = _align_and_score_fixed_plus_component(A_geom, B_geom, P_opt, A_C,B_idx_perm)  # fmt: skip
                 else:
                     # No alignment; direct RMSD on component given established frame
                     score = compute_rmsd(A_geom[A_C], B_geom[B_idx_perm], align=False)
@@ -431,23 +582,24 @@ def snap_rmsd(
                     best_perm = perm
 
             # Lock-in best permutation for this component
-            P[A_C] = B_C[best_perm]
-            A_fixed[A_C] = True
+            P_opt[A_C] = B_C[best_perm]
 
-            # Establish common reference frame after first component in first batch
-            if align and b_idx == 0 and c_idx == 0:
-                A_geom = _align_known(A_geom, B_geom, P, A_fixed)
+            # Per component and/or first component alignment (establishes frame)
+            if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
+                A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
-        # Batch-level global realignment; avoid duplicate alignments
+        # Realign after each batch; avoid duplicate alignments
         if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
-            A_geom = _align_known(A_geom, B_geom, P, A_fixed)
+            A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
-    assert np.all(A_fixed), "Not all indices got fixed!."  # Sanity check
-    count = Counter(P)
-    assert all(v == 1 for v in count.values()), "P is not a valid permutation!"  # Sanity check while debugging # fmt: skip
+    assert np.all(P_opt != -1), (
+        "Not all indices got fixed!."
+    )  # Sanity check for debugging
+    count = Counter(P_opt)
+    assert all(v == 1 for v in count.values()), "P_opt is not a valid permutation!"  # Sanity check while debugging # fmt: skip
     # Align false because already aligned at the end of the last batch if needed
-    final_rmsd = compute_rmsd(A_geom, B_geom[P], align=False)
-    return float(final_rmsd), P.tolist()
+    final_rmsd = compute_rmsd(A_geom, B_geom[P_opt], align=False)
+    return float(final_rmsd), P_opt.tolist()
 
 
 # def randomly_reorder_structure(struct: Structure) -> Structure:
@@ -544,7 +696,7 @@ if __name__ == "__main__":
         snap_time = time() - start
         print(f"{s_rmsd:.5f}", perm)
         print(f"snapRMSD time: {snap_time:.4f} s")
-        return s_rmsd, perm
+        return s_rmsd, perm, snap_time
 
     def benchmark_rdkit(s1, s2):
         start = time()
@@ -552,7 +704,7 @@ if __name__ == "__main__":
         rdkit_time = time() - start
         print(f"{rdkit_rmsd:.5f}")
         print(f"RDKit RMSD time: {rdkit_time:.4f} s")
-        return rdkit_rmsd
+        return rdkit_rmsd, rdkit_time
 
     def benchmark_symmrmsd(s1, s2, align=True):
         start = time()
@@ -593,12 +745,26 @@ if __name__ == "__main__":
     # assert rx.is_isomorphic(g1, g2), "Rustworkx says not isomorphic!"
 
     # batches = _pendant_factor(s1)
-    s_rmsd, perm = benchmark_snap(
-        s1, s2, align=True, factor="pendant", realign_per_component=True
-    )
-    s_rmsd, perm = benchmark_snap(s1, s2, align=True, factor_depth=0)
-    rdkit_rmsd = benchmark_rdkit(s1, s2)
+    s_rmsd, perm, snap_time = benchmark_snap(s1, s2, align=True, factor="pendant")
+    # s_rmsd, perm, snap_time_unfact = benchmark_snap(s1, s2, align=True, factor_depth=0)
+    rdkit_rmsd, rdkit_time = benchmark_rdkit(s1, s2)
     # spyrmsd_rmsd = benchmark_symmrmsd(s1, s2, align=True)
     # raw = compute_rmsd(s1.geometry, s2.geometry, align=False)
     # print(raw)
     # Compare s1_geom to s1.geometry to ensure no mutation
+    print(f"Speedup over RDKit: {rdkit_time / snap_time:.2f}x")
+
+    # import cProfile, pstats, io
+
+    # pr = cProfile.Profile()
+    # pr.enable()
+
+    # # the workload
+    # s_rmsd, perm = snap_rmsd(s1, s2, align=True, factor="pendant", factor_depth=1)
+
+    # pr.disable()
+    # s = io.StringIO()
+    # ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")  # or "tottime"
+    # ps.print_stats(30)  # top 30
+    # print(s.getvalue())
+    # pr.dump_stats("profile.out")
