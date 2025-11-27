@@ -548,6 +548,8 @@ def snap_rmsd(
         A_factored = factor
     batches = _factored_to_batches(A_factored)  # ensure Batch format
 
+    print(batches)
+
     # --- 3. Main control loop -----------------------------------------------------
     for b_idx, batch in enumerate(batches):
         for c_idx, component in enumerate(batch):

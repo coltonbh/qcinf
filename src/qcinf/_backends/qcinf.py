@@ -10,7 +10,7 @@ import numpy as np
 from qcconst import constants
 from qcio import LengthUnit, Structure
 
-from .utils import compute_rmsd, kabsch
+from qcinf._backends.utils import compute_rmsd, kabsch
 
 
 def _rmsd(
