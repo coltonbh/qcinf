@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [unreleased]
 
+### Added
+
+- `determine_connectivity` function that computes `Structure` connectivity using covalent radii and a scaling factor. Bond order is set to 1.0 for all bonds since this routine only infers connectivity.
+  ```python
+  >>> from qcinf import determine_connectivity, smiles_to_structure
+  >>> struct = smiles_to_structure("O")
+  >>> determine_connectivity(struct, cov_factor=1.2) # cov_factor is optional and 1.2 by default
+  [(0, 1, 1.0), (0, 2, 1.0)]
+  ```
+
 ## [0.2.1] - 2025-10-27
 
 ### Added

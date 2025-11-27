@@ -9,18 +9,21 @@
         "filterwarnings",
         "ghemical",
         "Hueckel",
+        "linalg",
         "MMFF",
         "ndarray",
         "numthreads",
         "openbabel",
         "pybel",
         "qcconst",
+        "qcinf",
         "rdkit",
         "readstring",
         "refmol",
         "refstruct",
         "rmsd",
         "swigvarlink",
+        "triu",
         "Waals"
     ]
 }
