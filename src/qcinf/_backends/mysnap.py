@@ -10,7 +10,7 @@ from qcio import Structure
 from sympy.combinatorics.perm_groups import PermutationGroup
 from sympy.combinatorics.permutations import Permutation
 
-from .utils import compute_rmsd, kabsch, qcp_rotation, kabsch_numba
+from .utils import compute_rmsd, kabsch, kabsch_numba, qcp_rotation
 from .utils2 import qcp_rmsd_numba
 
 
@@ -689,22 +689,22 @@ def _struct_to_rustworkx_graph(struct: "Structure") -> "rx.PyGraph":
 
 
 if __name__ == "__main__":
-    from time import time, perf_counter
+    from time import perf_counter, time
 
     import rustworkx as rx
+    from qcconst import constants as const
+    from qcconst import periodic_table as pt
     from qcio import Structure
+    from rmsd.calculate_rmsd import (
+        centroid,
+        check_reflections,
+        kabsch_rmsd,
+        reorder_inertia_hungarian,
+    )
     from spyrmsd.rmsd import symmrmsd
 
     from qcinf import smiles_to_structure
     from qcinf.algorithms.geometry import rmsd
-    from rmsd.calculate_rmsd import (
-        centroid,
-        kabsch_rmsd,
-        reorder_inertia_hungarian,
-        check_reflections,
-    )
-    from qcconst import periodic_table as pt
-    from qcconst import constants as const
 
     def benchmark_rmsd(s1, s2, align=True):
         # center on centroids as in main()
@@ -856,7 +856,9 @@ if __name__ == "__main__":
     # Compare s1_geom to s1.geometry to ensure no mutation
     # print(f"Speedup over RDKit: {rdkit_time / snap_time:.2f}x")
 
-    import cProfile, pstats, io
+    import cProfile
+    import io
+    import pstats
 
     pr = cProfile.Profile()
     pr.enable()
