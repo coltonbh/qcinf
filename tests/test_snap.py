@@ -1,0 +1,137 @@
+import pytest
+from qcio import Structure
+import pynauty as pn
+import numpy as np
+
+from qcinf._backends.mysnap import (
+    snap_rmsd,
+    _list_of_sets,
+    _map_via_canonical_labels,
+    _to_pynauty_graph,
+    validate_factoring,
+    Component,
+)
+
+
+def test_validate_factoring():
+    # Valid factoring
+    struct = Structure(
+        symbols=["C","H","H","H","H"], 
+        geometry=[[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 1, 1], [1, 0, 1]],
+        connectivity = [(0, 1, 1), (0, 2, 1), (0, 3, 1), (0, 4, 1)]
+    )  # fmt: skip
+
+    # backbone too small
+    with pytest.raises(ValueError, match="at least 3"):
+        factoring = [[[0, 1]], [[2, 3, 4]]]
+        validated = validate_factoring(struct, factoring)
+
+    #  missing indices
+    with pytest.raises(ValueError, match="missing indices"):
+        factoring_invalid = [[[0, 1, 2]], [[3]]]
+        validate_factoring(struct, factoring_invalid)
+
+    # duplicated indices
+    with pytest.raises(ValueError, match="multiple components"):
+        factoring_invalid = [[[0, 1, 2]], [[3, 3, 4]]]
+        validate_factoring(struct, factoring_invalid)
+
+    # valid factoring
+    factoring = [[[0, 1, 2]], [[3, 4]]]
+    validated = validate_factoring(struct, factoring)
+    bb_comp = Component(parent_idx=None, pool=False, idxs=np.array([0, 1, 2]))
+    import pdb; pdb.set_trace()
+    assert validated[0[0]] == bb_comp
+    pendant_comp = Component(parent_idx=2, pool=True, idxs=np.array([3, 4]))
+    assert validated[1[0]] == pendant_comp
+
+
+# def test_map_from_canon_labels():
+#     raise NotImplementedError("Test not implemented yet.")
+
+
+def test_list_of_sets():
+    order1 = _list_of_sets([0, 0, 0, 1, 1, 2])
+    assert order1 == [{0, 1, 2}, {3, 4}, {5}]
+    order2 = _list_of_sets([2, 1, 0, 1, 0, 0])
+    assert order2 == [{2, 4, 5}, {1, 3}, {0}]
+    order3 = _list_of_sets(["C", "C", "O", "H", "H", "C"])
+    # In alphabetical order: C, H, O
+    assert order3 == [{0, 1, 5}, {3, 4}, {2}]
+    order4 = _list_of_sets(["H", "O", "C", "H", "C", "C"])
+    # In alphabetical order: C, H, O
+    assert order4 == [{2, 4, 5}, {0, 3}, {1}]
+
+
+def test_map_via_canonical_labels():
+    # Methane
+    A = pn.Graph(
+        number_of_vertices=5,
+        adjacency_dict={0: [1, 2, 3, 4], 1: [0], 2: [0], 3: [0], 4: [0]},
+        vertex_coloring=[set((0,)), set((1, 2, 3, 4))],
+    )
+    B = pn.Graph(
+        number_of_vertices=5,
+        adjacency_dict={3: [2, 0, 1, 4], 2: [3], 0: [3], 1: [3], 4: [3]},
+        vertex_coloring=[set((3,)), set((0, 1, 2, 4))],
+    )
+    P = _map_via_canonical_labels(A, B)
+    assert P == [3, 0, 1, 2, 4]
+
+
+# def test_pendant_factor():
+
+
+# def test_snap_rmsd_hexane():
+#     s1 = Structure(
+#         symbols=["C"] * 6 + ["H"] * 14,
+#         geometry=[
+#             [5.98116646, 0.52282013, 0.18683216],
+#             [3.5380484, -0.97438892, -0.02324423],
+#             [1.22677193, 0.75662165, 0.04438482],
+#             [-1.22677207, -0.75662169, -0.16738562],
+#             [-3.53804842, 0.9743897, -0.09976718],
+#             [-5.9811668, -0.52282044, -0.30983313],
+#             [6.16550884, 1.86414964, -1.37719697],
+#             [7.60912924, -0.75186605, 0.13451374],
+#             [6.05153594, 1.58150233, 1.96266337],
+#             [3.55480523, -2.05768678, -1.78890325],
+#             [3.44146785, -2.33878245, 1.53254122],
+#             [1.33666633, 2.1225512, -1.51075215],
+#             [1.22334577, 1.84148417, 1.81055372],
+#             [-1.33667, -2.12254446, 1.38775779],
+#             [-1.22334374, -1.8414918, -1.93355029],
+#             [-3.55480363, 2.0576991, 1.66588465],
+#             [-3.44146804, 2.33877328, -1.65556187],
+#             [-6.16550087, -1.86415059, 1.25419779],
+#             [-7.60912961, 0.75186469, -0.25750622],
+#             [-6.05154281, -1.5815027, -2.08566428],
+#         ],
+#     )
+#     s2 = Structure(
+#         symbols=["C"] * 6 + ["H"] * 14,
+#         geometry=[
+#             [-4.22545815, 0.86161755, 1.55268074],
+#             [-3.27693818, 0.77183878, -1.15821459],
+#             [-1.42946617, -1.39482794, -1.66629484],
+#             [0.98863002, -1.38427555, -0.07517398],
+#             [2.6003713, 0.9841684, -0.4492124],
+#             [5.07748498, 0.80506476, 0.99816118],
+#             [-2.701678, 1.31612268, 2.87368888],
+#             [-5.0581696, -0.9482158, 2.10880838],
+#             [-5.67828288, 2.32145396, 1.74803816],
+#             [-2.41333708, 2.58767098, -1.65009163],
+#             [-4.90712503, 0.54322389, -2.41776227],
+#             [-0.91187571, -1.35750901, -3.67366085],
+#             [-2.40853972, -3.19557687, -1.35299337],
+#             [0.52120997, -1.60794006, 1.93029761],
+#             [2.10529346, -3.05147923, -0.5990203],
+#             [1.57629299, 2.66145205, 0.19992145],
+#             [3.00787903, 1.24866403, -2.46266819],
+#             [4.73598112, 0.59239545, 3.02734963],
+#             [6.19819161, -0.8101357, 0.35439167],
+#             [6.19953603, 2.51881626, 0.71175471],
+#         ],
+#     )
+#     rmsd_value, P_opt = snap_rmsd(s1, s2, align=True)
+#     assert rmsd_value == pytest.approx(3.010813, rel=1e-6)

@@ -2,11 +2,13 @@
 
 from collections.abc import Callable
 
-from qcio import Structure
+from qcio import LengthUnit, Structure
 
+import qcinf._backends.qcinf as qcinf_be
 from qcinf._backends import rdkit
 
 _RMSD_BACKEND_MAP: dict[str, Callable[..., float]] = {
+    "qcinf": qcinf_be._rmsd,
     "rdkit": rdkit._rmsd_rdkit,
 }
 
@@ -15,7 +17,8 @@ def rmsd(
     struct1: Structure,
     struct2: Structure,
     *,
-    backend: str = "rdkit",
+    backend: str = "qcinf",
+    length_unit: str = LengthUnit.BOHR,
     **kwargs,
 ) -> float:
     """Calculate the root mean square deviation (RMSD) between two structures.
@@ -23,7 +26,9 @@ def rmsd(
     Args:
         struct1: The first structure.
         struct2: The second structure.
-        backend: The backend to use for the RMSD calculation. Can be 'rdkit'.
+        backend: The backend to use for the RMSD calculation. Defaults to 'qcinf'.
+        length_unit: The length unit to use for the RMSD calculation. Defaults to
+            LengthUnit.BOHR. Other options include LengthUnit.ANGSTROM.
         **kwargs: Backend-specific additional keywords to pass to the RMSD calculation
             function. This can include options like 'symmetry' for symmetry-based RMSD
             calculations. The specific options depend on the backend used. See
@@ -41,10 +46,11 @@ def rmsd(
         raise ValueError(
             f"Unknown backend '{backend}'.  Known: {list(_RMSD_BACKEND_MAP)}"
         ) from e
-    return fn(struct1, struct2, **kwargs)
+    return fn(struct1, struct2, length_unit=length_unit, **kwargs)
 
 
 _ALIGN_BACKEND_MAP: dict[str, Callable[..., tuple[Structure, float]]] = {
+    "qcinf": qcinf_be._align,
     "rdkit": rdkit._align_rdkit,
 }
 
@@ -53,8 +59,8 @@ def align(
     struct: Structure,
     refstruct: Structure,
     *,
-    backend: str = "rdkit",
-    symmetry: bool = False,
+    symmetry: bool = True,
+    backend: str = "qcinf",
     **kwargs,
 ) -> tuple[Structure, float]:
     """Align a structure to a reference structure.
@@ -62,8 +68,8 @@ def align(
     Args:
         struct: The structure to align.
         refstruct: The reference structure to align against.
+        symmetry: Whether to consider symmetry in the alignment. Defaults to True.
         backend: The backend to use for the alignment. Can be 'rdkit'.
-        symmetry: Whether to use symmetry in the alignment. Defaults to False.
         **kwargs: Additional keyword arguments to pass to the alignment function.
 
     Returns:
