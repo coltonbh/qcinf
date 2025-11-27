@@ -6,5 +6,6 @@ except _metadata.PackageNotFoundError:
     # Source tree / build hook / CI checkout
     __version__ = "0.0.0+local"
 
+from .algorithms.connectivity import *  # noqa: F401, F403
 from .algorithms.conversion import *  # noqa: F401, F403
 from .algorithms.geometry import *  # noqa: F401, F403
