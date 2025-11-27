@@ -8,6 +8,7 @@ import threading
 from contextlib import contextmanager
 
 import numpy as np
+from numba import njit
 from qcio import Structure
 
 # one global lock per process
@@ -92,13 +93,54 @@ def rotate_structure(struct: Structure, axis: str, angle_deg: float) -> Structur
     return Structure.model_validate(new_struct)
 
 
-def kabsch(P: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+@njit(cache=True)
+def kabsch_numba(P, Q):
+    # Shape check must avoid Python exceptions inside njit
+    if P.shape[0] != Q.shape[0] or P.shape[1] != 3 or Q.shape[1] != 3:
+        # numba-friendly error: return something invalid or raise ValueError outside
+        raise ValueError("Shape mismatch")
+
+    N = P.shape[0]
+
+    # Compute centroids manually (for numba compatibility)
+    centroid_P = np.zeros(3)
+    centroid_Q = np.zeros(3)
+
+    for i in range(N):
+        centroid_P[0] += P[i, 0]
+        centroid_P[1] += P[i, 1]
+        centroid_P[2] += P[i, 2]
+
+        centroid_Q[0] += Q[i, 0]
+        centroid_Q[1] += Q[i, 1]
+        centroid_Q[2] += Q[i, 2]
+
+    centroid_P /= N
+    centroid_Q /= N
+
+    P_centered = P - centroid_P  # Center
+    Q_centered = Q - centroid_Q  # Center
+    H = P_centered.T @ Q_centered  # Covariance
+    U, S, Vt = np.linalg.svd(H)  # SVD
+    R = Vt.T @ U.T  # Rotation
+
+    if np.linalg.det(R) < 0.0:  # Fix improper rotation
+        Vt[-1, :] *= -1.0
+        R = Vt.T @ U.T
+
+    return R, centroid_P, centroid_Q
+
+
+def kabsch(
+    P: np.ndarray, Q: np.ndarray, proper_only: bool = True
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute the optimal rotation matrix that aligns P onto Q using the Kabsch algorithm.
 
     Args:
         P (np.ndarray): An N x 3 array of coordinates (the structure to rotate).
         Q (np.ndarray): An N x 3 array of coordinates (the reference structure).
+        proper_only (bool): If True, ensure the rotation is a proper rotation (det(R) = 1).
 
     Returns:
         R (np.ndarray): The optimal 3x3 rotation matrix.
@@ -126,11 +168,87 @@ def kabsch(P: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
     R = np.dot(Vt.T, U.T)
 
     # Correct for reflection (ensure a proper rotation with det(R)=1)
-    if np.linalg.det(R) < 0:
+    if proper_only and np.linalg.det(R) < 0:
         Vt[-1, :] *= -1
         R = np.dot(Vt.T, U.T)
 
     return R, centroid_P, centroid_Q
+
+
+def qcp_rotation(P: np.ndarray, Q: np.ndarray):
+    """
+    Optimal rotation matrix using Horn's quaternion method.
+
+    Parameters
+    ----------
+    P, Q : (N, 3) ndarray
+        Coordinates (must be paired).
+
+    Returns
+    -------
+    R : (3, 3) ndarray
+        Optimal rotation sending P → Q.
+    cP, cQ : (3,) ndarray
+        Centroids of P and Q.
+    """
+    if P.shape != Q.shape:
+        raise ValueError("Coordinate arrays must have identical shape.")
+
+    # Center both
+    cP = P.mean(axis=0)
+    cQ = Q.mean(axis=0)
+    X = P - cP
+    Y = Q - cQ
+
+    # Compute 3×3 cross-covariance matrix M = X^T Y
+    M = X.T @ Y
+
+    # Build Horn's 4×4 symmetric K matrix (Theobald eqn)
+    Sxx, Sxy, Sxz = M[0, :]
+    Syx, Syy, Syz = M[1, :]
+    Szx, Szy, Szz = M[2, :]
+
+    trace = Sxx + Syy + Szz
+
+    K = np.array(
+        [
+            [trace, Syz - Szy, Szx - Sxz, Sxy - Syx],
+            [Syz - Szy, Sxx - Syy - Szz, Sxy + Syx, Szx + Sxz],
+            [Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy],
+            [Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz],
+        ]
+    )
+
+    # Compute the dominant eigenvector (unit quaternion)
+    vals, vecs = np.linalg.eigh(K)
+    q = vecs[:, np.argmax(vals)]  # (q0, qx, qy, qz)
+
+    # Normalize quaternion
+    q = q / np.linalg.norm(q)
+    q0, qx, qy, qz = q
+
+    # Convert quaternion → rotation matrix
+    R = np.array(
+        [
+            [
+                1 - 2 * (qy * qy + qz * qz),
+                2 * (qx * qy - q0 * qz),
+                2 * (qx * qz + q0 * qy),
+            ],
+            [
+                2 * (qx * qy + q0 * qz),
+                1 - 2 * (qx * qx + qz * qz),
+                2 * (qy * qz - q0 * qx),
+            ],
+            [
+                2 * (qx * qz - q0 * qy),
+                2 * (qy * qz + q0 * qx),
+                1 - 2 * (qx * qx + qy * qy),
+            ],
+        ]
+    )
+
+    return R, cP, cQ
 
 
 def compute_rmsd(

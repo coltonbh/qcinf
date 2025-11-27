@@ -1,13 +1,49 @@
 import pytest
 from qcio import Structure
 import pynauty as pn
+import numpy as np
 
 from qcinf._backends.mysnap import (
     snap_rmsd,
     _list_of_sets,
     _map_via_canonical_labels,
     _to_pynauty_graph,
+    validate_factoring,
+    Component,
 )
+
+
+def test_validate_factoring():
+    # Valid factoring
+    struct = Structure(
+        symbols=["C","H","H","H","H"], 
+        geometry=[[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 1, 1], [1, 0, 1]],
+        connectivity = [(0, 1, 1), (0, 2, 1), (0, 3, 1), (0, 4, 1)]
+    )  # fmt: skip
+
+    # backbone too small
+    with pytest.raises(ValueError, match="at least 3"):
+        factoring = [[[0, 1]], [[2, 3, 4]]]
+        validated = validate_factoring(struct, factoring)
+
+    #  missing indices
+    with pytest.raises(ValueError, match="missing indices"):
+        factoring_invalid = [[[0, 1, 2]], [[3]]]
+        validate_factoring(struct, factoring_invalid)
+
+    # duplicated indices
+    with pytest.raises(ValueError, match="multiple components"):
+        factoring_invalid = [[[0, 1, 2]], [[3, 3, 4]]]
+        validate_factoring(struct, factoring_invalid)
+
+    # valid factoring
+    factoring = [[[0, 1, 2]], [[3, 4]]]
+    validated = validate_factoring(struct, factoring)
+    bb_comp = Component(parent_idx=None, pool=False, idxs=np.array([0, 1, 2]))
+    import pdb; pdb.set_trace()
+    assert validated[0[0]] == bb_comp
+    pendant_comp = Component(parent_idx=2, pool=True, idxs=np.array([3, 4]))
+    assert validated[1[0]] == pendant_comp
 
 
 # def test_map_from_canon_labels():
@@ -42,8 +78,9 @@ def test_map_via_canonical_labels():
     P = _map_via_canonical_labels(A, B)
     assert P == [3, 0, 1, 2, 4]
 
-def test_pendant_factor():
-    
+
+# def test_pendant_factor():
+
 
 # def test_snap_rmsd_hexane():
 #     s1 = Structure(

@@ -2059,7 +2059,7 @@ dev = [
 
 [[package]]
 name = "qcio"
-version = "0.16.1"
+version = "0.16.2"
 source = { editable = "../qcio" }
 dependencies = [
     { name = "eval-type-backport" },
@@ -2104,7 +2104,7 @@ dev = [
     { name = "pytest", specifier = ">=7.2.2" },
     { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "qcelemental", specifier = ">=0.26.0" },
-    { name = "qcinf", specifier = ">=0.2.1" },
+    { name = "qcinf", extras = ["all"], specifier = ">=0.2.1" },
     { name = "rdkit", specifier = ">=2022.9.5" },
     { name = "ruff", specifier = ">=0.10.1" },
     { name = "types-pyyaml", specifier = ">=6.0.12.10" },
