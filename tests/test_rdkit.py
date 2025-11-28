@@ -1,6 +1,6 @@
 import pytest
 
-from qcinf.utils import rotate_structure
+from qcinf.algorithms.geometry_kernels import rotate_structure
 
 pytest.importorskip("rdkit")  # tries `import rdkit` skips tests if not installed
 
