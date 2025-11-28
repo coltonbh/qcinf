@@ -10,6 +10,7 @@ dependencies = [
     "qcconst>=0.2.1",
     "qcio>=0.14.0",
     "typing-extensions>=4.12.2",
+    "numpy>=1.24.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,10 +45,12 @@ dev = [
     "openbabel-wheel>=3.1.1.21",
     "rdkit>=2024.9.6",
     "types-toml>=0.10.8.20240310",
+    "numba>=0.57.0",
 ]
 
 [project.optional-dependencies]
-openbabel = []
+fast = ["numba>=0.57.0"]
+openbabel = ["openbabel-wheel>=3.1.1.21"]
 rdkit = ["rdkit>=2024.9.6"]
 all = ["openbabel-wheel>=3.1.1.21", "rdkit>=2024.9.6"]
 

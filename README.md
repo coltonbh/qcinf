@@ -26,6 +26,38 @@ Cheminformatics algorithms and structure utilities using standardized [qcio](htt
 python -m pip install qcinf
 ```
 
+To install with numba-accelerated kernels:
+
+```bash
+python -m pip install 'qcinf[fast]'
+```
+
+Additional backends can be added for certain features, including `rdkit`, `openbabel`, or install the whole suite with `all`:
+
+```bash
+python -m pip install 'qcinf[rdkit,openbabel]'
+```
+
+Or
+
+```bash
+python -m pip install 'qcinf[all]'
+```
+
+## Development
+
+Install the package with all optional dependencies:
+
+```bash
+uv sync --all-extras
+```
+
+Run tests to ensure your setup is working correctly:
+
+```bash
+bash scripts/tests.sh
+```
+
 ## Support
 
 If you have any issues with `qcinf` or would like to request a feature, please open an [issue](https://github.com/coltonbh/qcinf/issues).
