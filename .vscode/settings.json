@@ -9,6 +9,7 @@
         "filterwarnings",
         "ghemical",
         "Hueckel",
+        "kabsch",
         "linalg",
         "MMFF",
         "ndarray",

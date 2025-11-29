@@ -12,7 +12,7 @@ from sympy.combinatorics.perm_groups import PermutationGroup
 from sympy.combinatorics.permutations import Permutation
 
 from .connectivity_helpers import _canonical_map, _to_pynauty_graph
-from .geometry_kernels import _compute_rmsd, kabsch
+from .geometry_kernels import _compute_rmsd, kabsch, qcp_rotation
 
 
 @dataclass
@@ -106,13 +106,6 @@ def _setwise_stabilizer_on_C(
     # Restrict to C
     local_gens = _restrict_global_generators_to_C(gens, C)
     return PermutationGroup(*local_gens)
-
-
-def _align_fixed(A: np.ndarray, B: np.ndarray, P_opt: np.ndarray) -> np.ndarray:
-    """Return a copy of A aligned to B using pairs (i -> P[i]) for i with fixed[i]."""
-    fixed = P_opt != -1
-    R, cA, cB = kabsch(A[fixed], B[P_opt[fixed]])
-    return (A - cA) @ R.T + cB  # align all of A
 
 
 def component_permutations(
@@ -229,28 +222,48 @@ def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
     return batches
 
 
+def _align_fixed(
+    A: np.ndarray, B: np.ndarray, P_opt: np.ndarray, backend: str = "kabsch"
+) -> np.ndarray:
+    """Return a copy of A aligned to B using pairs (i -> P[i]) for i with fixed[i]."""
+    fixed = P_opt != -1
+
+    if backend == "kabsch":
+        R, cA, cB = kabsch(A[fixed], B[P_opt[fixed]])
+    elif backend == "qcp":
+        R, cA, cB = qcp_rotation(A[fixed], B[P_opt[fixed]])
+    else:
+        raise ValueError(f"Unknown alignment backend '{backend}'.")
+
+    return (A - cA) @ R.T + cB  # align all of A
+
+
 def _align_and_score_fixed_plus_component(
     A_geom: np.ndarray,
     B_geom: np.ndarray,
     P_opt: np.ndarray,
     A_C: np.ndarray,
     B_idx_perm: np.ndarray,
+    backend: str = "kabsch",
 ) -> float:
     """Compute RMSD after aligning A to B using fixed + component indices."""
     # score on fixed ∪ C, with a per-candidate temporary alignment
     A_idx_fixed = np.flatnonzero(P_opt != -1)
     A_fixed_plus_C = np.concatenate([A_idx_fixed, A_C])
     B_fixed_plus_C = np.concatenate([P_opt[A_idx_fixed], B_idx_perm])
-    return _compute_rmsd(A_geom[A_fixed_plus_C], B_geom[B_fixed_plus_C], align=True)
+    return _compute_rmsd(
+        A_geom[A_fixed_plus_C], B_geom[B_fixed_plus_C], align=True, backend=backend
+    )
 
 
-def srmsd(
+def snap_rmsd_and_assignment(
     s1: Structure,
     s2: Structure,
+    *,
     align: bool = True,
+    align_per_component: bool = False,
     factor: str | dict[int | None, Component] = "pendant",
     factor_depth: int = 1,
-    realign_per_component: bool = False,
     alignment_backend: str = "kabsch",
 ) -> tuple[float, list[int]]:
     """
@@ -274,16 +287,17 @@ def srmsd(
             Generally one should only set this to False if the structures should be
             compared in their absolute orientations, e.g., from a crystal structure
             or docking pose.
+        align_per_component: Whether to realign the structures after each factored component
+            is processed. Default is False meaning that realignment is only done after
+            each batch, except for the first batch which must align for each proposed component
+            to establish a common reference frame.
         factor: Either a string specifying the factoring method, a callable that
             performs the factoring, or a batches object that factors the structure.
             Default is "pendant". Factoring should return list[Batch] where each Batch
             is a list of components and each component is a list of atom indices
             corresponding to s1, e.g., [[ [0,1,2], [3,4] ], [ [5,6], [7] ]].
         factor_depth: The depth of pendant groups to consider (default is 1).
-        realign_per_component: Whether to realign the structures after each factored component
-            is processed. Default is False meaning that realignment is only done after
-            each batch, except for the first batch which must align for each proposed component
-            to establish a common reference frame.
+
 
     Returns:
         (float, P_opt): The computed snapRMSD value and the optimal permutation as a
@@ -349,9 +363,9 @@ def srmsd(
             for perm in component_permutations(A_adj, A_coloring, P_opt, component):
                 B_idx_perm = B_C[perm]
 
-                if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
+                if align and (align_per_component or (b_idx == 0 and c_idx == 0)):
                     # Align per-candidate; use fixed + component indices
-                    score = _align_and_score_fixed_plus_component(A_geom, B_geom, P_opt, A_C,B_idx_perm)  # fmt: skip
+                    score = _align_and_score_fixed_plus_component(A_geom, B_geom, P_opt, A_C,B_idx_perm, backend=alignment_backend)  # fmt: skip
                 else:
                     # No alignment; direct RMSD on component given established frame
                     score = _compute_rmsd(A_geom[A_C], B_geom[B_idx_perm], align=False)
@@ -364,11 +378,11 @@ def srmsd(
             P_opt[A_C] = B_C[best_perm]
 
             # Per component and/or first component alignment (establishes frame)
-            if align and (realign_per_component or (b_idx == 0 and c_idx == 0)):
+            if align and (align_per_component or (b_idx == 0 and c_idx == 0)):
                 A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
         # Realign after each batch; avoid duplicate alignments
-        if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
+        if align and not align_per_component and not (b_idx == 0 and c_idx == 0):
             A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
     assert np.all(P_opt != -1), (
@@ -379,3 +393,19 @@ def srmsd(
     # Align false because already aligned at the end of the last batch if needed
     final_rmsd = _compute_rmsd(A_geom, B_geom[P_opt], align=False)
     return float(final_rmsd), P_opt.tolist()
+
+
+def snap_rmsd(s1: Structure, s2: Structure, **kwargs) -> float:
+    """Thin convenience wrapper around :func:`srmsd_and_opt_assignment` to return only RMSD."""
+    rmsd_val, _ = snap_rmsd_and_assignment(s1, s2, **kwargs)
+    return rmsd_val
+
+
+def snap_assignment(
+    s1: Structure,
+    s2: Structure,
+    **kwargs,
+) -> list[int]:
+    """Thin convenience wrapper around :func:`srmsd_and_opt_assignment` to return only assignment."""
+    _, P_opt = snap_rmsd_and_assignment(s1, s2, **kwargs)
+    return P_opt
