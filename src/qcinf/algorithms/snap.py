@@ -1,4 +1,18 @@
-"""Implementation of the snap algorithm for optimal atom assignment and RMSD calculation."""
+"""
+snap.py — Symmetry-aware RMSD (snapRMSD)
+
+This module implements the snapRMSD algorithm: a symmetry-aware RMSD metric
+designed to correctly handle molecular symmetries and conformational diversity while
+remaining extremely fast; a trifecta not available via exist graph isomorphism or
+Hungarian approaches. The core idea is to *factor* the molecule into a backbone and
+pendant components, align on the backbone, and then align components sequentially
+consistent with each pendant component's local automorphism group while respecting the
+global symmetry of the molecule. This approach allows snapRMSD to efficiently explore
+the space of symmetry-equivalent mappings without the combinatorial explosion of the
+graph isomorphism approach while still guaranteeing chemically correct mappings that
+respect connectivity (which the Hungarian approach regularly violates to produce
+spuriously low RMSD values).
+"""
 
 import itertools as it
 from collections import Counter, defaultdict
@@ -108,7 +122,7 @@ def _setwise_stabilizer_on_C(
     return PermutationGroup(*local_gens)
 
 
-def component_permutations(
+def _iter_component_permutations(
     adj_dict: dict[int, list[int]],
     base_colors: list[int],
     P_opt: np.ndarray,
@@ -148,7 +162,9 @@ def component_permutations(
         ).generate_schreier_sims(af=True)
 
 
-def _pendant_factor(s1: Structure, depth: int = 1) -> dict[int | None, Component]:
+def _factor_backbone_and_pendants(
+    s1: Structure, depth: int = 1
+) -> dict[int | None, Component]:
     """
     Factor the structure into a backbone + pendant groups for each element.
 
@@ -223,22 +239,22 @@ def _factored_to_batches(factored: dict[int | None, Component]) -> list[Batch]:
 
 
 def _align_fixed(
-    A: np.ndarray, B: np.ndarray, P_opt: np.ndarray, backend: str = "kabsch"
+    A: np.ndarray, B: np.ndarray, P_opt: np.ndarray, alignment_backend: str = "kabsch"
 ) -> np.ndarray:
     """Return a copy of A aligned to B using pairs (i -> P[i]) for i with fixed[i]."""
     fixed = P_opt != -1
 
-    if backend == "kabsch":
+    if alignment_backend == "kabsch":
         R, cA, cB = kabsch(A[fixed], B[P_opt[fixed]])
-    elif backend == "qcp":
+    elif alignment_backend == "qcp":
         R, cA, cB = qcp_rotation(A[fixed], B[P_opt[fixed]])
     else:
-        raise ValueError(f"Unknown alignment backend '{backend}'.")
+        raise ValueError(f"Unknown alignment backend '{alignment_backend}'.")
 
     return (A - cA) @ R.T + cB  # align all of A
 
 
-def _align_and_score_fixed_plus_component(
+def _aligned_rmsd_for_candidate(
     A_geom: np.ndarray,
     B_geom: np.ndarray,
     P_opt: np.ndarray,
@@ -262,7 +278,7 @@ def snap_rmsd_and_assignment(
     *,
     align: bool = True,
     align_per_component: bool = False,
-    factor: str | dict[int | None, Component] = "pendant",
+    factor: str | dict[int | None, Component] | None = "pendant",
     factor_depth: int = 1,
     alignment_backend: str = "kabsch",
 ) -> tuple[float, list[int]]:
@@ -291,11 +307,12 @@ def snap_rmsd_and_assignment(
             is processed. Default is False meaning that realignment is only done after
             each batch, except for the first batch which must align for each proposed component
             to establish a common reference frame.
-        factor: Either a string specifying the factoring method, a callable that
-            performs the factoring, or a batches object that factors the structure.
-            Default is "pendant". Factoring should return list[Batch] where each Batch
-            is a list of components and each component is a list of atom indices
-            corresponding to s1, e.g., [[ [0,1,2], [3,4] ], [ [5,6], [7] ]].
+        factor: May be a string specifying the built-in factoring method to use (default
+            "pendant"), None which turns off factoring (equivalent to a graph isomorphism
+            matching algorithm), or a custom structure factoring. If a factoring is
+            provided it is list[Batch] where each Batch is a list of components and
+            each component is a list of atom indices corresponding to s1, e.g.,
+            [[ [0,1,2], [3,4] ], [ [5,6], [7] ]].
         factor_depth: The depth of pendant groups to consider (default is 1).
 
 
@@ -321,7 +338,7 @@ def snap_rmsd_and_assignment(
         raise ValueError("Structures not isomorphic. Same connectivity required.")
 
     # --- Canonical labels & initial map
-    M = np.array(_canonical_map(A, B))
+    M = np.array(_canonical_map(A, B), dtype=int)  # i_A -> i_B
     P_opt = np.full(len(s1.symbols), -1, dtype=int)  # placeholder for final map
 
     # --- Compute automorphism group of A
@@ -332,13 +349,17 @@ def snap_rmsd_and_assignment(
     # --- 2. Factor batches ----------------------------------------------------------
     if isinstance(factor, str):
         if factor.lower() == "pendant":
-            A_factored = _pendant_factor(s1, depth=factor_depth)
-            B_factored = _pendant_factor(s2, depth=factor_depth)
+            A_factored = _factor_backbone_and_pendants(s1, depth=factor_depth)
+            B_factored = _factor_backbone_and_pendants(s2, depth=factor_depth)
         else:
             raise ValueError(f"Unknown factoring method '{factor}'.")
+    elif factor is None:
+        A_factored = _factor_backbone_and_pendants(s1, depth=0)
+        B_factored = _factor_backbone_and_pendants(s2, depth=0)
     else:
         A_factored = factor
     batches = _factored_to_batches(A_factored)  # ensure Batch format
+    # TODO: Need to factor B based on A using M.
 
     # --- 3. Main control loop -----------------------------------------------------
     for b_idx, batch in enumerate(batches):
@@ -353,19 +374,21 @@ def snap_rmsd_and_assignment(
                 B_C = M[A_C]  # Initial canonical map still valid
             elif component.pool:  # Remapped pool pendant
                 # Currently implemented in factored ordering; need to change to dynamic mapping here
-                B_C = B_factored[P_opt[component.parent_idx]].idxs
+                B_C = B_factored[P_opt[p_idx]].idxs
             else:  # Remapped structured pendant
                 # Implement with nauty canonical maps on local subgraphs rooted at parent_idx
                 raise NotImplementedError(
                     "Remapped structured pendants not yet implemented."
                 )
 
-            for perm in component_permutations(A_adj, A_coloring, P_opt, component):
+            for perm in _iter_component_permutations(
+                A_adj, A_coloring, P_opt, component
+            ):
                 B_idx_perm = B_C[perm]
 
                 if align and (align_per_component or (b_idx == 0 and c_idx == 0)):
                     # Align per-candidate; use fixed + component indices
-                    score = _align_and_score_fixed_plus_component(A_geom, B_geom, P_opt, A_C,B_idx_perm, backend=alignment_backend)  # fmt: skip
+                    score = _aligned_rmsd_for_candidate(A_geom, B_geom, P_opt, A_C,B_idx_perm, backend=alignment_backend)  # fmt: skip
                 else:
                     # No alignment; direct RMSD on component given established frame
                     score = _compute_rmsd(A_geom[A_C], B_geom[B_idx_perm], align=False)
@@ -385,11 +408,8 @@ def snap_rmsd_and_assignment(
         if align and not align_per_component and not (b_idx == 0 and c_idx == 0):
             A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
-    assert np.all(P_opt != -1), (
-        "Not all indices got fixed!."
-    )  # Sanity check for debugging
-    count = Counter(P_opt)
-    assert all(v == 1 for v in count.values()), "P_opt is not a valid permutation!"  # Sanity check while debugging # fmt: skip
+    assert np.all(P_opt != -1), "Not all indices got fixed!."  # Sanity check while debugging # fmt: skip
+    assert all(v == 1 for v in Counter(P_opt).values()), "P_opt is not a valid permutation!"  # Sanity check while debugging # fmt: skip
     # Align false because already aligned at the end of the last batch if needed
     final_rmsd = _compute_rmsd(A_geom, B_geom[P_opt], align=False)
     return float(final_rmsd), P_opt.tolist()
