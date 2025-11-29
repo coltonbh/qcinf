@@ -1,6 +1,9 @@
 import numpy as np
+import pynauty as pn
 import qcconst.periodic_table as pt
 from qcio import Structure
+
+from .connectivity_helpers import _canonical_map, _to_pynauty_graph
 
 
 def determine_connectivity(
@@ -49,3 +52,38 @@ def determine_connectivity(
     # Build connectivity list with bond order 1.0
     connectivity = [(int(i), int(j), 1.0) for i, j in zip(bonded_i, bonded_j)]
     return connectivity
+
+
+def canonical_ranks(structure: Structure, break_ties: bool = False) -> list[int]:
+    """Compute canonical ranks of atoms in a structure using NAUTY.
+
+    Args:
+        structure: The Structure for which to compute canonical ranks.
+        break_ties: Whether to break ties in ranks using a deterministic method.
+            Default is False.
+    Returns:
+        A list of canonical ranks corresponding to each atom in the structure.
+    """
+    A = _to_pynauty_graph(structure.adjacency_dict, structure.symbols)
+    if break_ties:
+        return pn.canon_label(A)
+    else:
+        A_gens, A_mantissa, A_exponent, A_coloring, A_num_orbits = pn.autgrp(A)
+        return A_coloring
+
+
+def canonical_map(
+    struct_a: Structure,
+    struct_b: Structure,
+) -> list[int]:
+    """Compute canonical map of atoms from struct_a to struct_b using NAUTY.
+
+    Args:
+        struct_a: The first Structure.
+        struct_b: The second Structure.
+    Returns:
+        A list of indices mapping atoms in struct_a to struct_b.
+    """
+    A = _to_pynauty_graph(struct_a.adjacency_dict, struct_a.symbols)
+    B = _to_pynauty_graph(struct_b.adjacency_dict, struct_b.symbols)
+    return _canonical_map(A, B)
