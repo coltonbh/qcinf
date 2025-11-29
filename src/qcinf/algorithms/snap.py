@@ -1,7 +1,9 @@
+"""Implementation of the snap algorithm for optimal atom assignment and RMSD calculation."""
+
 import itertools as it
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Iterable
 
 import numpy as np
 import pynauty as pn
@@ -9,47 +11,27 @@ from qcio import Structure
 from sympy.combinatorics.perm_groups import PermutationGroup
 from sympy.combinatorics.permutations import Permutation
 
-from .geometry_kernels import _compute_rmsd, kabsch, qcp_rotation
+from .connectivity_helpers import _canonical_map, _to_pynauty_graph
+from .geometry_kernels import _compute_rmsd, kabsch
 
 
-def _list_of_sets(coloring: list[Any]) -> list[set[Any]]:
-    """Convert coloring list to pynauty list of sets format.
+@dataclass
+class Component:
+    """A component with optional parent and attachment indices.
 
-    !!! Important
-        The order of the sets in the output list MUST be consistent between graphs.
-        For this reason we sort the color keys before constructing the output list.
-
-
-    >>> _list_of_sets(["H","O","C","H","C","C"])
-    [{2, 4, 5}, {0, 3}, {1}]  # In alphabetical order: C, H, O
-
-    >>> _list_of_sets([2,1,0,1,0,0])
-    [{2, 4, 5}, {1, 3}, {0}]  # In numerical order: 0, 1, 2
+    Attributes:
+        parent_idx: The index of the parent component this component is attached to. No
+            parent_idx means this is a backbone component.
+        pool: Whether this component is a pool pendant (True) or non-pool pendant (False).
+        idxs: The indices of the atoms in this component.
     """
-    buckets: dict[int, set[int]] = defaultdict(set)
-    for vertex_idx, color in enumerate(coloring):
-        buckets[color].add(vertex_idx)
-    ordered_colors = sorted(buckets.keys())
-    return [buckets[colors] for colors in ordered_colors]
+
+    parent_idx: int | None
+    pool: bool
+    idxs: np.ndarray
 
 
-def _to_pynauty_graph(adj_dict: dict[int, list[int]], coloring: list[Any]) -> pn.Graph:
-    """
-    Convert a qcio Structure to a pynauty Graph.
-
-    Parameters:
-        adj_dict: Adjacency dictionary of the graph, e.g. {0: [1,2], 1: [0,3], ...}.
-        coloring: List of color IDs for each vertex, e.g., [0,0,0,3,3,3]
-            indicates atoms 0-2 are of one color and atoms 3-5 are a second color.
-            Using the structure's symbols array can be used as a default coloring.
-    Returns:
-        The corresponding pynauty Graph.
-    """
-    return pn.Graph(
-        number_of_vertices=len(adj_dict.keys()),
-        adjacency_dict=adj_dict,
-        vertex_coloring=_list_of_sets(coloring),
-    )
+Batch = list[Component]
 
 
 def _component_partition(
@@ -73,26 +55,8 @@ def _component_partition(
     for idx in C:
         # Magic number to offset in-C vs out-of-C
         new_coloring[idx] = new_coloring[idx] - 1000000
+
     return new_coloring
-
-
-def _map_via_canonical_labels(
-    A: pn.Graph,
-    B: pn.Graph,
-) -> list[int]:
-    """Generate a mapping of vertices from A -> B using canonical labels.
-    The final mapping P satisfies P[i_A] = i_B.
-
-    Note:
-        pynauty's canonical labels map canon -> original index, meaning that
-        canX[i_canon] = i_orig.
-    """
-    canA, canB = pn.canon_label(A), pn.canon_label(B)
-    invA = [0] * len(canA)  # inv(can1): orig1 -> canon
-    for i_canon, i_orig1 in enumerate(canA):
-        invA[i_orig1] = i_canon
-    # P[i_orig1] = can2[canon_of_i_orig1]
-    return [canB[invA[i_orig1]] for i_orig1 in range(len(canA))]
 
 
 def _restrict_global_generators_to_C(
@@ -148,27 +112,7 @@ def _align_fixed(A: np.ndarray, B: np.ndarray, P_opt: np.ndarray) -> np.ndarray:
     """Return a copy of A aligned to B using pairs (i -> P[i]) for i with fixed[i]."""
     fixed = P_opt != -1
     R, cA, cB = kabsch(A[fixed], B[P_opt[fixed]])
-    R_q, cA_q, cB_q = qcp_rotation(A[fixed], B[P_opt[fixed]])
     return (A - cA) @ R.T + cB  # align all of A
-
-
-@dataclass
-class Component:
-    """A component with optional parent and attachment indices.
-
-    Attributes:
-        parent_idx: The index of the parent component this component is attached to. No
-            parent_idx means this is a backbone component.
-        pool: Whether this component is a pool pendant (True) or non-pool pendant (False).
-        idxs: The indices of the atoms in this component.
-    """
-
-    parent_idx: int | None
-    pool: bool
-    idxs: np.ndarray
-
-
-Batch = list[Component]
 
 
 def component_permutations(
@@ -300,14 +244,14 @@ def _align_and_score_fixed_plus_component(
     return _compute_rmsd(A_geom[A_fixed_plus_C], B_geom[B_fixed_plus_C], align=True)
 
 
-def snap_rmsd(
+def srmsd(
     s1: Structure,
     s2: Structure,
     align: bool = True,
     factor: str | dict[int | None, Component] = "pendant",
     factor_depth: int = 1,
-    backend: str = "pynauty",
     realign_per_component: bool = False,
+    alignment_backend: str = "kabsch",
 ) -> tuple[float, list[int]]:
     """
     Compute snapRMSD(s1→s2). Returns (rmsd, P) where P optimally maps s1 indices to s2 indices.
@@ -336,7 +280,6 @@ def snap_rmsd(
             is a list of components and each component is a list of atom indices
             corresponding to s1, e.g., [[ [0,1,2], [3,4] ], [ [5,6], [7] ]].
         factor_depth: The depth of pendant groups to consider (default is 1).
-        backend: The backend to use for automorphism computations. Default is "pynauty".
         realign_per_component: Whether to realign the structures after each factored component
             is processed. Default is False meaning that realignment is only done after
             each batch, except for the first batch which must align for each proposed component
@@ -364,7 +307,7 @@ def snap_rmsd(
         raise ValueError("Structures not isomorphic. Same connectivity required.")
 
     # --- Canonical labels & initial map
-    M = np.array(_map_via_canonical_labels(A, B))
+    M = np.array(_canonical_map(A, B))
     P_opt = np.full(len(s1.symbols), -1, dtype=int)  # placeholder for final map
 
     # --- Compute automorphism group of A
@@ -428,7 +371,9 @@ def snap_rmsd(
         if align and not realign_per_component and not (b_idx == 0 and c_idx == 0):
             A_geom = _align_fixed(A_geom, B_geom, P_opt)
 
-    assert np.all(P_opt != -1), "Not all indices got fixed!."  # Sanity check
+    assert np.all(P_opt != -1), (
+        "Not all indices got fixed!."
+    )  # Sanity check for debugging
     count = Counter(P_opt)
     assert all(v == 1 for v in count.values()), "P_opt is not a valid permutation!"  # Sanity check while debugging # fmt: skip
     # Align false because already aligned at the end of the last batch if needed

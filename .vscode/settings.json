@@ -15,6 +15,7 @@
         "numthreads",
         "openbabel",
         "pybel",
+        "pynauty",
         "qcconst",
         "qcinf",
         "rdkit",
